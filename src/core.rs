@@ -4,7 +4,6 @@ use std::{
     io::{Read, Seek},
     ops::Bound,
 };
-use thiserror::Error;
 
 pub trait ReadSeek: Read + Seek {}
 
@@ -95,13 +94,13 @@ impl HeaderSeekerReader for GnuRadioAttachedHeaderFile {
             .range((Bound::Unbounded, Bound::Included(sample)))
             .next_back()?;
 
-        Some(last.1.clone())
+        Some(*last.1)
     }
 }
 
 impl HeaderStreamReader for GnuRadioAttachedHeaderFile {
     fn get_current_header(&self) -> Option<Header> {
-        return self.stream_state.cur_header;
+        self.stream_state.cur_header
     }
 
     fn get_rem_samples_in_segment(&self) -> Option<SampleCount> {
@@ -140,7 +139,7 @@ struct GnuRadioAttachedHeaderStream {
 
 #[cfg(test)]
 mod core_tests {
-    use super::*;
+    
 
     #[test]
     fn read_complex_samples_attached_file() {}
