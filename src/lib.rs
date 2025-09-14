@@ -1,14 +1,13 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+///!
+///! # gnuradio-meta
+///! This library allows efficiently reading from GNU Radio meta file outputs efficiently, whether they are
+///! handled as entire, seekable files, or as streams of bytes. Both attached and dettached headers are supported,
+///! and it's also possible to use a seekable header file alongside a stream of binary data.
+///! In the future, writing data will also be supported.
+///!
+///! ## Crate status
+///! * Currently in development, core API may change greatly.
+///! * Writing data is currently not implemented nor designed into the API.
+///!
+///! ## Examples
+pub mod core;

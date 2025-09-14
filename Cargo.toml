@@ -6,3 +6,4 @@ license = "GPL-3.0-or-later"
 description = "A module to efficiently read and write GNU Radio File Meta Sink files"
 
 [dependencies]
+thiserror = "2.0.16"
