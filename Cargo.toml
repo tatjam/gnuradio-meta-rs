@@ -7,3 +7,4 @@ description = "A module to efficiently read and write GNU Radio File Meta Sink f
 
 [dependencies]
 thiserror = "2.0.16"
+byteorder = "1"
