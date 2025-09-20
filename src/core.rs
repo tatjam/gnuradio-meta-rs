@@ -4,9 +4,20 @@ use std::{
     io::{Read, Seek, SeekFrom},
 };
 
-use crate::rxtime::RxTime;
-
-pub trait ReadSeek: Read + Seek {}
+/// A date-time with 64 bits for the second and 64 bits for the fractional part,
+/// allowing accurate time-keeping in seconds regardless of origin point, maintaining
+/// sub nano-second precision at any date, and wrapping around in billions of years
+/// into the future.
+///
+/// Note that using a f32 for timetsamps is inappropiate if you need them relative
+/// to UNIX epoch or similar, as nowadays the precision is way less than a second.
+/// Similarly, f64 are not appropiate if you need high precision. As of 2025, the
+/// double precision for a UNIX timestamp is down to 0.3us, which may not be good
+/// enough in some high precision radio applications, and will only get worse!
+///
+/// If you only need timestamps relative to the start of the file, a f32 or f64 is
+/// probably fine, but this is how GNU Radio gives the data.
+pub type Timestamp = fixed::FixedI128<fixed::types::extra::U64>;
 
 /// Refers to a number of samples
 type SampleCount = u64;
@@ -42,8 +53,8 @@ pub struct Error {}
 pub struct Header {
     /// Sample rate of the data
     samp_rate: f64,
-    /// Reception time of the first sample of the data
-    rx_time: RxTime,
+    /// Reception time of the first sample of the data, relative to first sample
+    rx_time: Timestamp,
     /// Size of the item in bytes
     size: u32,
     /// Type of the data
@@ -64,7 +75,7 @@ impl Header {
     /// Returns the expected reception time of sample at offset `sample` (which
     /// may be outside the header just fine) assuming the sample rate is held
     /// constant until said offset.
-    fn get_sample_time(&self, sample: i64) -> RxTime {
+    fn get_sample_time(&self, sample: i64) -> Timestamp {
         todo!("Implement");
     }
 }
@@ -75,7 +86,7 @@ pub struct SampleMeta {
     /// Sample rate of the data read
     samp_rate: f64,
     /// Reception time of the first sample read
-    rx_time: RxTime,
+    rx_time: Timestamp,
 }
 
 /// Which qualities of the current segment are guaranteed to be preserved after the seek?
@@ -122,7 +133,7 @@ pub trait SampleReadSeek<T>: HeaderReader {
     /// has been performed.
     fn get_last_read_offset_in_header(&mut self) -> Option<u64>;
 
-    fn get_last_read_rx_time(&mut self) -> Option<RxTime> {
+    fn get_last_read_rx_time(&mut self) -> Option<Timestamp> {
         todo!("Implement");
         /*
         let offset = self.get_last_read_offset_in_header()?;
