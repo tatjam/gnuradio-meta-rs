@@ -15,7 +15,7 @@ use std::io::SeekFrom;
 /// probably fine, but this is how GNU Radio gives the data.
 pub type Timestamp = fixed::FixedI128<fixed::types::extra::U64>;
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub enum DataType {}
 
 impl DataType {
@@ -39,7 +39,7 @@ impl DataType {
 pub struct Error {}
 
 /// Header as read from the GNU radio file
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug, Clone)]
 pub struct Header {
     /// Sample rate of the data
     samp_rate: f64,
@@ -159,28 +159,30 @@ pub struct SampleMeta {
 }
 
 /// This trait allows accessing headers for both attached and dettached files using a common interface.
-pub trait HeaderReader {}
+pub trait HeaderReader {
+    /// Seeks over the header of the next sample to be read, if such a header is expected
+    /// on next byte to be read from the binary, and returns said header.
+    fn seek_next_header(&mut self) -> Result<Option<&Header>, Error>;
+}
 
-trait SampleReader: HeaderReader {
+pub trait RawSampleReader {
     /// Read samples from the binary into the target buffer, performing no conversion, and assuming
     /// all bytes read are valid samples that are directly convertible to T (i.e. readable with endianness change)
     fn read_raw<T>(&mut self, tgt: &mut [T]) -> Result<u64, Error>;
 
     /// Read samples from the binary into the target buffer, performing conversion from the given type
     /// to be assumed to be stored in the binary samples
-    fn read_conv<T>(&mut self, tgt: &mut [T], dtype: DataType) -> Result<u64, Error>;
+    fn read_raw_conv<T>(&mut self, tgt: &mut [T], dtype: DataType) -> Result<u64, Error>;
 }
 
 /// Similar to Rust's Read + Seek, but obtaining individual samples instead of bytes,
 /// and with radio specific functionality (for example, you are guaranteed to never
-/// get streams with different sample rates, or with time jumps, out of this!)
+/// get streams with different sample rates, or with time jumps, if you use read())
 ///
-/// For maximum performance, it's recommended to only ever read forwards such that all
-/// disk access is sequential. This yields maximum speed on most systems.
-pub trait SampleReadSeek<T>: SampleReader {
-    /// Gets the header that the next sample that will be read belongs to, or None if
-    /// EOF has been reached.
-    fn get_next_read_header(&self) -> Option<&Header>;
+/// For maximum performance, it's recommended to only ever read forward such that all
+/// disk access is sequential. This should yield maximum speed on most systems.
+pub trait SampleReadSeek: RawSampleReader {
+    fn get_header_reader(&self) -> &mut impl HeaderReader;
 
     /// Gets the header that the last read sample belonged to, or None if no samples
     /// have been read yet, or a seek has been performed.
@@ -200,18 +202,35 @@ pub trait SampleReadSeek<T>: SampleReader {
         */
     }
 
-    /// Returns the pair of current and next header, returning None if either EOF is
-    /// reached, or there's no first header in the file (it's empty). Current header
-    /// will be set = next header if this is the first read from the file.
-    fn get_cur_and_next_header(&self) -> Option<(&Header, &Header)> {
-        let next_read_header = self.get_next_read_header()?; //< Returns if EOF
-        let current_header = match self.get_last_read_header() {
-            // First read from file, where last_read_header is empty, we assume current == next header
-            None => next_read_header,
-            Some(v) => v,
+    #[doc(hidden)]
+    /// Internal use, obtains the header of the last read and the one applicable to the next read, 
+    /// alongside the number of remaining samples in the applicable header.
+    /// Has some extra logic:
+    /// - If it's the first read from the file, last == applicable == first header
+    /// - If the first header of the file does not exists (empty file), returns None
+    /// - If EOF is reached, returns None
+    fn get_last_and_applicable_header(&mut self) -> Result<Option<(&Header, &Header, u64)>, Error> {
+        let last_header = match self.get_last_read_header() {
+            Some(v) => v, 
+            None => match self.get_header_reader().seek_next_header()? {
+                None => return Ok(None),
+                Some(next) => next,
+            }
+        }
+
+        let num_already_read = self.get_last_read_offset_in_header().unwrap_or(0);
+        let (appl_header, num_remain) = if num_already_read == last_header.get_num_samples() {
+            // We are done with last segment, read next one
+            match self.get_header_reader().seek_next_header()? {
+                Some(v) => (v, v.get_num_samples()),
+                None => return Ok(None), // EOF
+            }
+        } else {
+            // There's still data to read in the current segment
+            (last_header, last_header.get_num_samples() - num_already_read)
         };
 
-        Some((current_header, next_read_header))
+        Ok(Some((last_header, appl_header, num_remain)))
     }
 
     /// Fills buf from left to right, at most filling it completely. It will stop reading samples
@@ -225,41 +244,33 @@ pub trait SampleReadSeek<T>: SampleReader {
     /// will simply copy from the source file to the destination array.
     ///
     /// If an error is returned, the buffer may have been modified!
-    fn read_samples(&mut self, buf: &mut [T]) -> Result<u64, Error> {
+    fn read_samples<T>(&mut self, buf: &mut [T]) -> Result<u64, Error> {
         let mut num_read: u64 = 0;
 
         while num_read < buf.len() as u64 {
-            let (cur, next) = match self.get_cur_and_next_header() {
-                None => break,
+            let (last_header, appl_header, segment_remain) = match self.get_last_and_applicable_header()? {
+                None => break, // EOF or empty file
                 Some(v) => v,
             };
 
-            if cur != next {
-                if !next.dtype.reads_directly_to::<T>() {
-                    break; // Not directly readable to T, stop reading
-                }
+            if !appl_header.dtype.reads_directly_to::<T>() {
+                break; // Not directly readable to T, stop reading
+            }
 
-                if cur.is_compatible_with(next, SeekPreserve::All) {
+            if appl_header != last_header {
+                if !appl_header.is_compatible_with(last_header, SeekPreserve::All) {
                     break; // Something is different about the new header, stop reading
                 }
 
-                if !next.is_continuation_of(cur) {
+                if !appl_header.is_continuation_of(last_header) {
                     break; // The segment had a time discontinuity, stop reading
                 }
             }
 
-            // We are safe to keep reading until the end of the header
-            let num_already_read = self.get_last_read_offset_in_header().unwrap_or(0);
-
-            debug_assert!(
-                num_already_read < cur.get_num_samples(),
-                "Reached end of header, but no skip was triggered"
-            );
-
-            let segment_remain = cur.get_num_samples() - num_already_read;
             let buff_remain = buf.len() as u64 - num_read;
 
             let to_read = buff_remain.min(segment_remain);
+            // to read is safe to read raw from the binary
             let start = num_read as usize;
             let end = start + to_read as usize;
             num_read += self.read_raw::<T>(&mut buf[start..end])?;
