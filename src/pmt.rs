@@ -20,8 +20,6 @@ pub enum Tag {
     Tuple(Vec<Tag>),
 }
 
-struct PMTParser {}
-
 #[derive(Error, Debug)]
 pub enum ParseError {
     #[error("Unexpected EOF while parsing")]

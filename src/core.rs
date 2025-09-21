@@ -20,6 +20,7 @@ use thiserror::Error;
 /// probably fine, but this is how GNU Radio gives the data.
 pub type Timestamp = fixed::FixedI128<fixed::types::extra::U64>;
 
+#[derive(Default)]
 pub struct HeaderStorage {
     /// Maps a byte in the binary file to the header that starts at that byte, either
     /// because it's stored there, or because the first byte of that header's segment is there.
@@ -286,8 +287,8 @@ pub trait SampleReadSeek {
     fn get_header_reader_mut(&mut self) -> &mut impl HeaderReader;
     fn get_sample_reader_mut(&mut self) -> &mut (impl Read + Seek);
 
-    /// Gets the header that the last read sample belonged to, or None if no samples
-    /// have been read yet, or a seek has been performed.
+    /// Gets the header that the last read sample belonged to, or None if no samples have been read
+    /// yet, or a seek has been performed.
     fn get_last_read_header(&mut self) -> Result<Option<Header>, MetaFileError> {
         let pos = self.get_sample_reader_mut().stream_position()?;
         self.get_header_reader_mut().get_header_for_byte(pos)
@@ -437,6 +438,15 @@ pub struct AttachedHeader<T: Read + Seek> {
     file: T,
 }
 
+impl<T: Read + Seek> AttachedHeader<T> {
+    fn new(file: T) -> AttachedHeader<T> {
+        AttachedHeader {
+            header_storage: Default::default(),
+            file,
+        }
+    }
+}
+
 impl<T: Read + Seek> HeaderReader for AttachedHeader<T> {
     fn get_header_storage_mut(&mut self) -> &mut HeaderStorage {
         &mut self.header_storage
@@ -500,6 +510,7 @@ impl<B: Read + Seek, H: Read + Seek> SampleReadSeek for DettachedHeader<B, H> {
 
 #[cfg(test)]
 mod core_tests {
+    use super::*;
     use std::fs::File;
 
     /// Returns the binary file (always) and the header file if it exists
@@ -508,19 +519,34 @@ mod core_tests {
         use std::process::Command;
 
         let src_path = format!("test_files/{}.grc", file);
+        let src_path_py = format!("target/test_files/{}.py", file);
         let dst_path = format!("target/test_files/{}", file);
         // not always generated
         let dst_path_hdr = format!("target/test_files/{}.grh", file);
 
-        let path = Path::new(file);
-        if !path.exists() {
-            let out = Command::new("gnuradio-companion")
-                .args(&["--run", src_path.as_str(), "--out_file", dst_path.as_str()])
-                .output()
-                .expect(format!("failed to run GNU radio on {}", file).as_str());
-            if !out.status.success() {
-                panic!("GNU radio failed on file {}", file)
-            }
+        // Compile the file
+        let cout = Command::new("grcc")
+            .args(&[src_path.as_str(), "-o", "target/test_files/"])
+            .output()
+            .expect(format!("failed to run GNU radio compiler on {}", src_path).as_str());
+        if !cout.status.success() {
+            panic!(
+                "GNU radio compiler failed on file {}, error: {}",
+                src_path,
+                String::from_utf8(cout.stderr).unwrap()
+            )
+        }
+
+        let out = Command::new("python3")
+            .args(&[src_path_py.as_str(), "--out", dst_path.as_str()])
+            .output()
+            .expect(format!("failed to run GNU radio on {}", file).as_str());
+        if !out.status.success() {
+            panic!(
+                "GNU radio failed on file {}, error: {}",
+                file,
+                String::from_utf8(out.stderr).unwrap(),
+            )
         }
 
         (File::open(dst_path).unwrap(), File::open(dst_path_hdr).ok())
@@ -529,8 +555,21 @@ mod core_tests {
     #[test]
     fn read_byte_samples_attached() {
         let (file, _) = get_or_run_gnuradio("bytes_increasing");
-    }
+        let mut reader = AttachedHeader::new(file);
+        let mut samples: [u8; 256] = [0; 256];
 
-    #[test]
-    fn read_complex_samples_attached() {}
+        let num_read = reader.read_samples(&mut samples).unwrap();
+        // Basic sample reading checks
+        assert_eq!(num_read, 256);
+        for i in 0..256 {
+            assert_eq!(samples[i], i as u8);
+        }
+
+        // Public header interface
+        let header = reader.get_last_read_header();
+
+        // Check sane internal state for headers
+
+        // Further reads should return nothing
+    }
 }
