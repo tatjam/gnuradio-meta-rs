@@ -1,4 +1,5 @@
-use std::io::SeekFrom;
+use std::io::{Read, Seek, SeekFrom};
+use thiserror::Error;
 
 /// A date-time with 64 bits for the second and 64 bits for the fractional part,
 /// allowing accurate time-keeping in seconds regardless of origin point, maintaining
@@ -36,7 +37,11 @@ impl DataType {
     }
 }
 
-pub struct Error {}
+#[derive(Error, Debug)]
+pub enum MetaFileError {
+    #[error("Reader I/O error")]
+    IoError(#[from] std::io::Error),
+}
 
 /// Header as read from the GNU radio file
 #[derive(PartialEq, Debug, Clone)]
@@ -57,6 +62,10 @@ pub struct Header {
     strt: u64,
     /// Size in bytes of the data in this header's segment
     bytes: u64,
+
+    /// Absolute position of the first byte of the data from the start of the file,
+    /// computed by ourselves
+    abs_pos: u64,
 }
 
 /// Which qualities of the current segment are guaranteed to be preserved after the seek?
@@ -147,6 +156,10 @@ impl Header {
         let diff = self.rx_time.abs_diff(last_sample_t).to_num::<f64>();
         diff <= 0.1 * other.get_sample_duration()
     }
+
+    fn get_sample_pos_of_byte(&self, byte: u64) -> u64 {
+        todo!("Implement");
+    }
 }
 
 pub struct StreamTag {}
@@ -160,19 +173,22 @@ pub struct SampleMeta {
 
 /// This trait allows accessing headers for both attached and dettached files using a common interface.
 pub trait HeaderReader {
-    /// Seeks over the header of the next sample to be read, if such a header is expected
-    /// on next byte to be read from the binary, and returns said header.
-    fn seek_next_header(&mut self) -> Result<Option<&Header>, Error>;
+    /// Returns the header_num header, with 0 being the first header of the file, if it exists.
+    /// If it needs to seek in the binary file, it must restore the seeker at the end.
+    fn get_header_at(&self, header_num: usize) -> Result<Option<&Header>, MetaFileError>;
+
+    /// Gets the header applicable to a byte in the binary file (byte) or None if non-existent.
+    fn get_header_for_byte(&self, byte: u64) -> Result<Option<&Header>, MetaFileError>;
 }
 
-pub trait RawSampleReader {
+pub trait RawSampleReader: Read + Seek {
     /// Read samples from the binary into the target buffer, performing no conversion, and assuming
     /// all bytes read are valid samples that are directly convertible to T (i.e. readable with endianness change)
-    fn read_raw<T>(&mut self, tgt: &mut [T]) -> Result<u64, Error>;
+    fn read_raw<T>(&mut self, tgt: &mut [T]) -> Result<u64, MetaFileError>;
 
     /// Read samples from the binary into the target buffer, performing conversion from the given type
     /// to be assumed to be stored in the binary samples
-    fn read_raw_conv<T>(&mut self, tgt: &mut [T], dtype: DataType) -> Result<u64, Error>;
+    fn read_raw_conv<T>(&mut self, tgt: &mut [T], dtype: DataType) -> Result<u64, MetaFileError>;
 }
 
 /// Similar to Rust's Read + Seek, but obtaining individual samples instead of bytes,
@@ -181,17 +197,16 @@ pub trait RawSampleReader {
 ///
 /// For maximum performance, it's recommended to only ever read forward such that all
 /// disk access is sequential. This should yield maximum speed on most systems.
-pub trait SampleReadSeek: RawSampleReader {
+pub trait SampleReadSeek {
     fn get_header_reader(&self) -> &mut impl HeaderReader;
+    fn get_sample_reader(&self) -> &mut impl RawSampleReader;
 
     /// Gets the header that the last read sample belonged to, or None if no samples
     /// have been read yet, or a seek has been performed.
-    fn get_last_read_header(&self) -> Option<&Header>;
-
-    /// Gets the sample position relative to the first sample of the header the
-    /// last read sample belongs to. Return None if no sample has been read yet, or a seek
-    /// has been performed.
-    fn get_last_read_offset_in_header(&self) -> Option<u64>;
+    fn get_last_read_header(&self) -> Result<Option<&Header>, MetaFileError> {
+        let pos = self.get_sample_reader().stream_position()?;
+        return self.get_header_reader().get_header_for_byte(pos);
+    }
 
     fn get_last_read_rx_time(&mut self) -> Option<Timestamp> {
         todo!("Implement");
@@ -203,34 +218,33 @@ pub trait SampleReadSeek: RawSampleReader {
     }
 
     #[doc(hidden)]
-    /// Internal use, obtains the header of the last read and the one applicable to the next read, 
-    /// alongside the number of remaining samples in the applicable header.
-    /// Has some extra logic:
-    /// - If it's the first read from the file, last == applicable == first header
-    /// - If the first header of the file does not exists (empty file), returns None
-    /// - If EOF is reached, returns None
-    fn get_last_and_applicable_header(&mut self) -> Result<Option<(&Header, &Header, u64)>, Error> {
-        let last_header = match self.get_last_read_header() {
-            Some(v) => v, 
-            None => match self.get_header_reader().seek_next_header()? {
-                None => return Ok(None),
-                Some(next) => next,
-            }
-        }
-
-        let num_already_read = self.get_last_read_offset_in_header().unwrap_or(0);
-        let (appl_header, num_remain) = if num_already_read == last_header.get_num_samples() {
-            // We are done with last segment, read next one
-            match self.get_header_reader().seek_next_header()? {
-                Some(v) => (v, v.get_num_samples()),
-                None => return Ok(None), // EOF
-            }
-        } else {
-            // There's still data to read in the current segment
-            (last_header, last_header.get_num_samples() - num_already_read)
+    fn get_last_and_applicable_header(&self) -> Result<Option<(&Header, &Header)>, MetaFileError> {
+        let last_header = match self.get_last_read_header()? {
+            None => return Ok(None), // EOF of empty file
+            Some(v) => v,
         };
 
-        Ok(Some((last_header, appl_header, num_remain)))
+        let appl_header = if last_header.abs_pos + last_header.bytes
+            <= self.get_sample_reader().stream_position()?
+        {
+            // We finished the last segment, seek to next one
+            self.get_sample_reader().seek(SeekFrom::Current(1))?;
+            let out = match self
+                .get_header_reader()
+                .get_header_for_byte(self.get_sample_reader().stream_position()?)?
+            {
+                None => return Ok(None), // EOF achieved
+                Some(v) => v,
+            };
+            self.get_sample_reader()
+                .seek(SeekFrom::Start(out.abs_pos))?;
+            out
+        } else {
+            // We keep reading from last segment
+            last_header
+        };
+
+        Ok(Some((last_header, appl_header)))
     }
 
     /// Fills buf from left to right, at most filling it completely. It will stop reading samples
@@ -244,13 +258,13 @@ pub trait SampleReadSeek: RawSampleReader {
     /// will simply copy from the source file to the destination array.
     ///
     /// If an error is returned, the buffer may have been modified!
-    fn read_samples<T>(&mut self, buf: &mut [T]) -> Result<u64, Error> {
+    fn read_samples<T>(&self, buf: &mut [T]) -> Result<u64, MetaFileError> {
         let mut num_read: u64 = 0;
 
         while num_read < buf.len() as u64 {
-            let (last_header, appl_header, segment_remain) = match self.get_last_and_applicable_header()? {
-                None => break, // EOF or empty file
+            let (last_header, appl_header) = match self.get_last_and_applicable_header()? {
                 Some(v) => v,
+                None => break, // EOF or empty file
             };
 
             if !appl_header.dtype.reads_directly_to::<T>() {
@@ -269,11 +283,17 @@ pub trait SampleReadSeek: RawSampleReader {
 
             let buff_remain = buf.len() as u64 - num_read;
 
-            let to_read = buff_remain.min(segment_remain);
-            // to read is safe to read raw from the binary
+            let cur_sample =
+                appl_header.get_sample_pos_of_byte(self.get_sample_reader().stream_position()?);
+            let samps_remain = appl_header.get_num_samples() - cur_sample;
+
+            let to_read = buff_remain.min(samps_remain);
             let start = num_read as usize;
             let end = start + to_read as usize;
-            num_read += self.read_raw::<T>(&mut buf[start..end])?;
+
+            num_read += self
+                .get_sample_reader()
+                .read_raw::<T>(&mut buf[start..end])?;
         }
 
         Ok(num_read)
@@ -288,7 +308,7 @@ pub trait SampleReadSeek: RawSampleReader {
     /// Returns the number of samples actually read into buf.
     /// This function may convert if neccesary, and is thus expected to be slightly slower
     /// than read.
-    fn read_conv(&mut self, buf: &mut [T]) -> Result<u64, Error> {
+    fn read_conv<T>(&mut self, buf: &mut [T]) -> Result<u64, MetaFileError> {
         todo!("Implement");
     }
 
@@ -307,20 +327,24 @@ pub trait SampleReadSeek: RawSampleReader {
     /// Seeks within the file, preserving certain qualities of the current segment as
     /// given in preserve. Returns the current position in samples from the start of the file, or
     /// errors if the seek could not be performed, leaving the position unmodified.
-    fn seek(&mut self, pos: SeekFrom, preserve: SeekPreserve) -> Result<u64, Error> {
+    fn seek(&mut self, pos: SeekFrom, preserve: SeekPreserve) -> Result<u64, MetaFileError> {
         todo!("Implement");
     }
 
     /// Same as seek, but moving to segment start samples, and pos given in segments.
     /// Returns the current position in samples from the start of the file, or errors if the
     /// seek could not be performed, leaving the position unmodified.
-    fn seek_segment(&mut self, pos_seg: SeekFrom, preserve: SeekPreserve) -> Result<u64, Error> {
+    fn seek_segment(
+        &mut self,
+        pos_seg: SeekFrom,
+        preserve: SeekPreserve,
+    ) -> Result<u64, MetaFileError> {
         todo!("Implement");
     }
 
     /// Seeks the next segment which has a format that can be converted to `T`, returning the
     /// number of segments skipped, erroring if no such segment can be found.
-    fn seek_valid_segment(&mut self) -> Result<u64, Error> {
+    fn seek_valid_segment(&mut self) -> Result<u64, MetaFileError> {
         todo!("Implement");
     }
 }
