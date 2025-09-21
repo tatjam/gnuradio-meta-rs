@@ -43,13 +43,13 @@ fn parse_symbol<T: Read>(reader: &mut T) -> Result<Tag, ParseError> {
         return Err(ParseError::UnexpectedEOF());
     }
 
-    return Ok(Tag::Symbol(String::from_utf8(bytes)?));
+    Ok(Tag::Symbol(String::from_utf8(bytes)?))
 }
 
 fn parse_pair_inner<T: Read>(reader: &mut T) -> Result<(Tag, Tag), ParseError> {
     let first = parse(reader)?;
     let second = parse(reader)?;
-    return Ok((first, second));
+    Ok((first, second))
 }
 
 fn parse_pair<T: Read>(reader: &mut T) -> Result<Tag, ParseError> {
@@ -65,7 +65,7 @@ fn expect_byte<T: Read>(reader: &mut T) -> Result<u8, ParseError> {
         return Err(ParseError::UnexpectedEOF());
     }
 
-    return Ok(byte_buf[0]);
+    Ok(byte_buf[0])
 }
 
 fn parse_dict_inner<T: Read>(rdr: &mut T, tgt: &mut StringToTag) -> Result<(), ParseError> {
@@ -84,11 +84,11 @@ fn parse_dict_inner<T: Read>(rdr: &mut T, tgt: &mut StringToTag) -> Result<(), P
 
     let next_byte = expect_byte(rdr)?;
 
-    return match next_byte {
+    match next_byte {
         0x6 => Ok(()),                     // null byte, dict is over
         0x9 => parse_dict_inner(rdr, tgt), // dict byte, continue parsing
         _ => Err(ParseError::MalformedDict()),
-    };
+    }
 }
 
 fn parse_dict<T: Read>(reader: &mut T) -> Result<Tag, ParseError> {
@@ -126,7 +126,7 @@ fn parse_tag<T: Read>(reader: &mut T, kind: u8) -> Result<Tag, ParseError> {
 /// The reader must be positioned at the start of a Tag
 pub fn parse<T: Read>(reader: &mut T) -> Result<Tag, ParseError> {
     let byte = expect_byte(reader)?;
-    return parse_tag(reader, byte);
+    parse_tag(reader, byte)
 }
 
 /// Tries to read a tag, but if EOF is found on the first read, None is returned

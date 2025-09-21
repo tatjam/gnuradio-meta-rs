@@ -41,8 +41,23 @@ impl HeaderStorage {
     }
 }
 
+/// Note all of these can be "complex", which duplicates each entry as a complex number,
+/// and makes them directly convertible to Complex<x>.
 #[derive(Copy, Clone, PartialEq, Debug)]
-pub enum DataType {}
+pub enum DataType {
+    /// Directly convertible to i8
+    Byte,
+    /// Directly convertible to i16
+    Short,
+    /// Directly convertible to i32
+    Int,
+    // Long (not possible from GNU Radio)
+    // LongLong, (not possible from GNU Radio)
+    /// Directly convertible to f32
+    Float,
+    /// Directly convertible to f64
+    Double,
+}
 
 impl DataType {
     pub fn reads_directly_to<T>(&self) -> bool {
@@ -161,7 +176,7 @@ impl Header {
 
     /// Gets the duration of a sample at the sample rate of the header
     fn get_sample_duration(&self) -> f64 {
-        return self.samp_dur;
+        self.samp_dur
     }
 
     fn is_compatible_with(&self, other: &Header, preserve: SeekPreserve) -> bool {
@@ -223,9 +238,8 @@ pub trait HeaderReader {
         };
 
         // TODO: bytes may be wrong!
-        let next_byte = last.get().abs_pos + last.get().bytes + 1;
 
-        next_byte
+        last.get().abs_pos + last.get().bytes + 1
     }
 
     fn get_header_for_byte(&mut self, byte: u64) -> Result<Option<Header>, MetaFileError> {
@@ -280,7 +294,7 @@ pub trait SampleReadSeek {
     /// have been read yet, or a seek has been performed.
     fn get_last_read_header(&mut self) -> Result<Option<Header>, MetaFileError> {
         let pos = self.get_sample_reader_mut().stream_position()?;
-        return self.get_header_reader_mut().get_header_for_byte(pos);
+        self.get_header_reader_mut().get_header_for_byte(pos)
     }
 
     fn get_last_read_rx_time(&mut self) -> Option<Timestamp> {
@@ -454,7 +468,7 @@ impl RawSampleReader for BinaryGNURadioFile {
 
 impl Seek for BinaryGNURadioFile {
     fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        return self.file.seek(pos);
+        self.file.seek(pos)
     }
 }
 
