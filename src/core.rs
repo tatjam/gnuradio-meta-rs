@@ -1,4 +1,10 @@
-use std::io::{Read, Seek, SeekFrom};
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{Seek, SeekFrom};
+use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
+
+use crate::pmt::{Tag, parse, parse_maybe_eof};
 use thiserror::Error;
 
 /// A date-time with 64 bits for the second and 64 bits for the fractional part,
@@ -15,6 +21,25 @@ use thiserror::Error;
 /// If you only need timestamps relative to the start of the file, a f32 or f64 is
 /// probably fine, but this is how GNU Radio gives the data.
 pub type Timestamp = fixed::FixedI128<fixed::types::extra::U64>;
+
+pub struct HeaderStorage {
+    /// Maps a byte in the binary file to the header that starts at that byte, either
+    /// because it's stored there, or because the first byte of that header's segment is there.
+    store: BTreeMap<u64, Header>,
+}
+
+impl HeaderStorage {
+    /// Gets the header applicable to a byte in the binary file (byte) or None if not loaded.
+    fn get_header_for_byte(&self, byte: u64) -> Option<&Header> {
+        todo!();
+    }
+
+    fn add_header_for_byte(&mut self, byte: u64, header: Header) {
+        // Check that all headers previous to this one have been loaded, or none
+        // previous to it have been loaded, so the indexing logic works
+        self.store.insert(byte, header);
+    }
+}
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub enum DataType {}
@@ -41,6 +66,8 @@ impl DataType {
 pub enum MetaFileError {
     #[error("Reader I/O error")]
     IoError(#[from] std::io::Error),
+    #[error("PMT parser error")]
+    ParseError(#[from] crate::pmt::ParseError),
 }
 
 /// Header as read from the GNU radio file
@@ -63,15 +90,21 @@ pub struct Header {
     /// Size in bytes of the data in this header's segment
     bytes: u64,
 
+    extra_dict: Rc<Tag>,
+
     /// Absolute position of the first byte of the data from the start of the file,
     /// computed by ourselves
     abs_pos: u64,
+
+    /// Absolute position of the first byte of the HEADER in the file (either attached or dettached),
+    /// computed by ourselves
+    pos_in_file: u64,
 }
 
 /// Which qualities of the current segment are guaranteed to be preserved after the seek?
 /// When in doubt, use All as most GNU Radio files are a single format and sample rate.
 #[derive(PartialEq, Eq)]
-enum SeekPreserve {
+pub enum SeekPreserve {
     /// Allow seeking into any type of segment
     None,
     /// Allow seeking into segments which have the same format as the current segment
@@ -173,15 +206,57 @@ pub struct SampleMeta {
 
 /// This trait allows accessing headers for both attached and dettached files using a common interface.
 pub trait HeaderReader {
-    /// Returns the header_num header, with 0 being the first header of the file, if it exists.
-    /// If it needs to seek in the binary file, it must restore the seeker at the end.
-    fn get_header_at(&self, header_num: usize) -> Result<Option<&Header>, MetaFileError>;
+    fn get_header_storage_mut(&mut self) -> &mut HeaderStorage;
+    fn get_header_storage(&self) -> &HeaderStorage;
 
-    /// Gets the header applicable to a byte in the binary file (byte) or None if non-existent.
-    fn get_header_for_byte(&self, byte: u64) -> Result<Option<&Header>, MetaFileError>;
+    /// Load the next header from the file. start_byte is the first byte of said header in the binary file
+    /// (thus only used in AttachedHeader mode!). Return None if no more to read.
+    fn load_next_header(&mut self, start_byte: u64) -> Result<Option<Header>, MetaFileError>;
+
+    #[doc(hidden)]
+    fn get_first_byte_of_next_header_to_read(&mut self) -> u64 {
+        // We are guaranteed to have the last header read, so simply get the byte after
+        // the last data in the previous (last loaded) header
+        let last = match self.get_header_storage_mut().store.last_entry() {
+            None => return 0, // No headers are loaded, this is the first byte of the file either way
+            Some(v) => v,
+        };
+
+        // TODO: bytes may be wrong!
+        let next_byte = last.get().abs_pos + last.get().bytes + 1;
+
+        next_byte
+    }
+
+    fn get_header_for_byte(&mut self, byte: u64) -> Result<Option<Header>, MetaFileError> {
+        if let Some(v) = self.get_header_storage().get_header_for_byte(byte) {
+            return Ok(Some(v.clone()));
+        }
+
+        // Not loaded! We need to get the first byte of the header, as 'byte' may be at any point
+        // in the segment. Note that headers are always loaded "left-to-right", so this may load
+        // a whole bunch of headers.
+        loop {
+            let first_byte = self.get_first_byte_of_next_header_to_read();
+            if first_byte >= byte {
+                // It should have already been loaded
+                return Ok(self.get_header_storage().get_header_for_byte(byte).cloned());
+            }
+            if let Some(v) = self.load_next_header(first_byte)? {
+                self.get_header_storage_mut()
+                    .add_header_for_byte(first_byte, v);
+            } else {
+                // We reached EOF...
+                break;
+            }
+        }
+
+        // ...out of bounds byte
+        Ok(None)
+    }
 }
 
-pub trait RawSampleReader: Read + Seek {
+pub trait RawSampleReader: Seek {
     /// Read samples from the binary into the target buffer, performing no conversion, and assuming
     /// all bytes read are valid samples that are directly convertible to T (i.e. readable with endianness change)
     fn read_raw<T>(&mut self, tgt: &mut [T]) -> Result<u64, MetaFileError>;
@@ -198,14 +273,14 @@ pub trait RawSampleReader: Read + Seek {
 /// For maximum performance, it's recommended to only ever read forward such that all
 /// disk access is sequential. This should yield maximum speed on most systems.
 pub trait SampleReadSeek {
-    fn get_header_reader(&self) -> &mut impl HeaderReader;
-    fn get_sample_reader(&self) -> &mut impl RawSampleReader;
+    fn get_header_reader_mut(&mut self) -> &mut impl HeaderReader;
+    fn get_sample_reader_mut(&mut self) -> &mut impl RawSampleReader;
 
     /// Gets the header that the last read sample belonged to, or None if no samples
     /// have been read yet, or a seek has been performed.
-    fn get_last_read_header(&self) -> Result<Option<&Header>, MetaFileError> {
-        let pos = self.get_sample_reader().stream_position()?;
-        return self.get_header_reader().get_header_for_byte(pos);
+    fn get_last_read_header(&mut self) -> Result<Option<Header>, MetaFileError> {
+        let pos = self.get_sample_reader_mut().stream_position()?;
+        return self.get_header_reader_mut().get_header_for_byte(pos);
     }
 
     fn get_last_read_rx_time(&mut self) -> Option<Timestamp> {
@@ -218,30 +293,30 @@ pub trait SampleReadSeek {
     }
 
     #[doc(hidden)]
-    fn get_last_and_applicable_header(&self) -> Result<Option<(&Header, &Header)>, MetaFileError> {
+    fn get_last_and_applicable_header(
+        &mut self,
+    ) -> Result<Option<(Header, Header)>, MetaFileError> {
         let last_header = match self.get_last_read_header()? {
             None => return Ok(None), // EOF of empty file
             Some(v) => v,
         };
 
         let appl_header = if last_header.abs_pos + last_header.bytes
-            <= self.get_sample_reader().stream_position()?
+            <= self.get_sample_reader_mut().stream_position()?
         {
             // We finished the last segment, seek to next one
-            self.get_sample_reader().seek(SeekFrom::Current(1))?;
-            let out = match self
-                .get_header_reader()
-                .get_header_for_byte(self.get_sample_reader().stream_position()?)?
-            {
+            self.get_sample_reader_mut().seek(SeekFrom::Current(1))?;
+            let cur_pos = self.get_sample_reader_mut().stream_position()?;
+            let out = match self.get_header_reader_mut().get_header_for_byte(cur_pos)? {
                 None => return Ok(None), // EOF achieved
                 Some(v) => v,
             };
-            self.get_sample_reader()
+            self.get_sample_reader_mut()
                 .seek(SeekFrom::Start(out.abs_pos))?;
             out
         } else {
             // We keep reading from last segment
-            last_header
+            last_header.clone()
         };
 
         Ok(Some((last_header, appl_header)))
@@ -258,7 +333,7 @@ pub trait SampleReadSeek {
     /// will simply copy from the source file to the destination array.
     ///
     /// If an error is returned, the buffer may have been modified!
-    fn read_samples<T>(&self, buf: &mut [T]) -> Result<u64, MetaFileError> {
+    fn read_samples<T>(&mut self, buf: &mut [T]) -> Result<u64, MetaFileError> {
         let mut num_read: u64 = 0;
 
         while num_read < buf.len() as u64 {
@@ -272,11 +347,11 @@ pub trait SampleReadSeek {
             }
 
             if appl_header != last_header {
-                if !appl_header.is_compatible_with(last_header, SeekPreserve::All) {
+                if !appl_header.is_compatible_with(&last_header, SeekPreserve::All) {
                     break; // Something is different about the new header, stop reading
                 }
 
-                if !appl_header.is_continuation_of(last_header) {
+                if !appl_header.is_continuation_of(&last_header) {
                     break; // The segment had a time discontinuity, stop reading
                 }
             }
@@ -284,7 +359,7 @@ pub trait SampleReadSeek {
             let buff_remain = buf.len() as u64 - num_read;
 
             let cur_sample =
-                appl_header.get_sample_pos_of_byte(self.get_sample_reader().stream_position()?);
+                appl_header.get_sample_pos_of_byte(self.get_sample_reader_mut().stream_position()?);
             let samps_remain = appl_header.get_num_samples() - cur_sample;
 
             let to_read = buff_remain.min(samps_remain);
@@ -292,7 +367,7 @@ pub trait SampleReadSeek {
             let end = start + to_read as usize;
 
             num_read += self
-                .get_sample_reader()
+                .get_sample_reader_mut()
                 .read_raw::<T>(&mut buf[start..end])?;
         }
 
@@ -349,9 +424,104 @@ pub trait SampleReadSeek {
     }
 }
 
-pub struct AttachedHeader {}
+pub struct BinaryGNURadioFile {
+    file: File,
+}
 
-pub struct DettachedHeader {}
+impl Deref for BinaryGNURadioFile {
+    type Target = File;
+
+    fn deref(&self) -> &Self::Target {
+        &self.file
+    }
+}
+
+impl DerefMut for BinaryGNURadioFile {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.file
+    }
+}
+
+impl RawSampleReader for BinaryGNURadioFile {
+    fn read_raw<T>(&mut self, tgt: &mut [T]) -> Result<u64, MetaFileError> {
+        todo!()
+    }
+
+    fn read_raw_conv<T>(&mut self, tgt: &mut [T], dtype: DataType) -> Result<u64, MetaFileError> {
+        todo!()
+    }
+}
+
+impl Seek for BinaryGNURadioFile {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        return self.file.seek(pos);
+    }
+}
+
+pub struct AttachedHeader {
+    header_storage: HeaderStorage,
+    file: BinaryGNURadioFile,
+}
+
+impl HeaderReader for AttachedHeader {
+    fn get_header_storage_mut(&mut self) -> &mut HeaderStorage {
+        &mut self.header_storage
+    }
+    fn get_header_storage(&self) -> &HeaderStorage {
+        &self.header_storage
+    }
+
+    fn load_next_header(&mut self, start_byte: u64) -> Result<Option<Header>, MetaFileError> {
+        todo!()
+    }
+}
+
+impl SampleReadSeek for AttachedHeader {
+    fn get_header_reader_mut(&mut self) -> &mut impl HeaderReader {
+        self
+    }
+
+    fn get_sample_reader_mut(&mut self) -> &mut impl RawSampleReader {
+        &mut self.file
+    }
+}
+
+pub struct DettachedHeader {
+    header_storage: HeaderStorage,
+    header_file: File,
+    binary_file: BinaryGNURadioFile,
+}
+
+impl HeaderReader for DettachedHeader {
+    fn get_header_storage_mut(&mut self) -> &mut HeaderStorage {
+        &mut self.header_storage
+    }
+
+    fn get_header_storage(&self) -> &HeaderStorage {
+        &self.header_storage
+    }
+
+    fn load_next_header(&mut self, start_byte: u64) -> Result<Option<Header>, MetaFileError> {
+        // header_file seek is always at the next header, so we can simply
+        let header = match parse_maybe_eof(&mut self.header_file) {
+            Ok(Some(v)) => v,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(MetaFileError::ParseError(e)),
+        };
+        let extra = parse(&mut self.header_file)?;
+        todo!()
+    }
+}
+
+impl SampleReadSeek for DettachedHeader {
+    fn get_header_reader_mut(&mut self) -> &mut impl HeaderReader {
+        self
+    }
+
+    fn get_sample_reader_mut(&mut self) -> &mut impl RawSampleReader {
+        &mut self.binary_file
+    }
+}
 
 #[cfg(test)]
 mod core_tests {

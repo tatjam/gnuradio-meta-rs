@@ -7,7 +7,8 @@ use thiserror::Error;
 
 type StringToTag = HashMap<String, Tag>;
 
-enum Tag {
+#[derive(PartialEq, Debug)]
+pub enum Tag {
     Bool(bool),
     Symbol(String),
     Int32(i32),
@@ -106,12 +107,8 @@ fn parse_tuple<T: Read>(reader: &mut T) -> Result<Tag, ParseError> {
     Ok(Tag::Tuple(vec))
 }
 
-/// The reader must be positioned at the start of a Tag
-pub fn parse<T: Read>(reader: &mut T) -> Result<Tag, ParseError> {
-    // Note: If Rust doesn't perform tail call optimization, this is vulnerable
-    // to stack overflow. Use `become` as soon as it becomes available
-    let byte = expect_byte(reader)?;
-    match byte {
+fn parse_tag<T: Read>(reader: &mut T, kind: u8) -> Result<Tag, ParseError> {
+    match kind {
         0x0 => Ok(Tag::Bool(true)),
         0x1 => Ok(Tag::Bool(false)),
         0x2 => parse_symbol(reader),
@@ -123,5 +120,28 @@ pub fn parse<T: Read>(reader: &mut T) -> Result<Tag, ParseError> {
         0xb => Ok(Tag::UInt64(reader.read_u64::<BigEndian>()?)),
         0xc => parse_tuple(reader),
         _x => todo!("Unimplemented"),
+    }
+}
+
+/// The reader must be positioned at the start of a Tag
+pub fn parse<T: Read>(reader: &mut T) -> Result<Tag, ParseError> {
+    let byte = expect_byte(reader)?;
+    return parse_tag(reader, byte);
+}
+
+/// Tries to read a tag, but if EOF is found on the first read, None is returned
+/// instead of an error.
+/// The reader must be positioned at the start of a Tag
+pub fn parse_maybe_eof<T: Read>(reader: &mut T) -> Result<Option<Tag>, ParseError> {
+    let byte = match expect_byte(reader) {
+        Err(e) => match e {
+            ParseError::UnexpectedEOF() => return Ok(None),
+            _ => return Err(e),
+        },
+        Ok(v) => v,
+    };
+    match parse_tag(reader, byte) {
+        Err(e) => Err(e),
+        Ok(v) => Ok(Some(v)),
     }
 }
