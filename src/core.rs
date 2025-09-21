@@ -30,7 +30,11 @@ pub struct HeaderStorage {
 impl HeaderStorage {
     /// Gets the header applicable to a byte in the binary file (byte) or None if not loaded.
     fn get_header_for_byte(&self, byte: u64) -> Option<&Header> {
-        todo!();
+        use std::ops::Bound::*;
+        let last = self.store.range((Unbounded, Excluded(byte))).next()?;
+        // If last is present, it may not be correct just yet, as it could be a too early header
+        let max_byte = last.1.abs_pos + last.1.bytes;
+        if byte < max_byte { Some(last.1) } else { None }
     }
 
     fn add_header_for_byte(&mut self, byte: u64, header: Header) {
@@ -82,6 +86,18 @@ pub enum MetaFileError {
     IoError(#[from] std::io::Error),
     #[error("PMT parser error")]
     ParseError(#[from] crate::pmt::ParseError),
+    #[error("Invalid header error")]
+    InvalidHeaderError(#[from] InvalidHeaderError),
+}
+
+#[derive(Error, Debug)]
+pub enum InvalidHeaderError {
+    #[error("Header was not a dictionary")]
+    HeaderNotDictionary,
+    #[error("Missing field {0} in header")]
+    MissingField(&'static str),
+    #[error("Field {0} was present in header, but was of unexpected type")]
+    WrongTypeField(&'static str),
 }
 
 /// Header as read from the GNU radio file
@@ -209,7 +225,36 @@ impl Header {
     }
 
     fn from_tags(tag: Tag, extra: Tag) -> Result<Header, MetaFileError> {
-        todo!();
+        let tag = if let Tag::Dict(as_dict) = tag {
+            as_dict
+        } else {
+            return Err(InvalidHeaderError::HeaderNotDictionary.into());
+        };
+
+        println!("Read header from tag {:?}", tag);
+        println!("Extra: {:?}", extra);
+
+        let samp_rate = tag
+            .get("rx_rate")
+            .ok_or(InvalidHeaderError::MissingField("rx_rate"))?
+            .get_f64()
+            .ok_or(InvalidHeaderError::WrongTypeField("rx_rate"))?;
+
+        let samp_dur = 1.0 / samp_rate;
+
+        Ok(Header {
+            samp_rate,
+            samp_dur,
+            rx_time: todo!(),
+            size: todo!(),
+            dtype: todo!(),
+            cplx: todo!(),
+            strt: todo!(),
+            bytes: todo!(),
+            extra_dict: todo!(),
+            abs_pos: todo!(),
+            pos_in_file: todo!(),
+        })
     }
 }
 
@@ -255,7 +300,7 @@ pub trait HeaderReader {
         // a whole bunch of headers.
         loop {
             let first_byte = self.get_first_byte_of_next_header_to_read();
-            if first_byte >= byte {
+            if first_byte > byte {
                 // It should have already been loaded
                 return Ok(self.get_header_storage().get_header_for_byte(byte).cloned());
             }
@@ -456,7 +501,20 @@ impl<T: Read + Seek> HeaderReader for AttachedHeader<T> {
     }
 
     fn load_next_header(&mut self, start_byte: u64) -> Result<Option<Header>, MetaFileError> {
-        todo!()
+        let old_pos = self.file.stream_position()?;
+        self.file.seek(SeekFrom::Start(start_byte))?;
+
+        // header_file seek is always at the next header, so we can simply
+        let header_tag = match parse_maybe_eof(&mut self.file) {
+            Ok(Some(v)) => v,
+            Ok(None) => return Ok(None),
+            Err(e) => return Err(MetaFileError::ParseError(e)),
+        };
+        let extra = parse(&mut self.file)?;
+        let header = Header::from_tags(header_tag, extra)?;
+        self.file.seek(SeekFrom::Start(old_pos))?;
+
+        Ok(Some(header))
     }
 }
 

@@ -20,6 +20,48 @@ pub enum Tag {
     Tuple(Vec<Tag>),
 }
 
+impl Tag {
+    pub fn get_bool(&self) -> Option<bool> {
+        if let Tag::Bool(b) = self {
+            Some(*b)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_symbol(&self) -> Option<String> {
+        if let Tag::Symbol(s) = self {
+            Some(s.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn get_i32(&self) -> Option<i32> {
+        if let Tag::Int32(i) = self {
+            Some(*i)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_f64(&self) -> Option<f64> {
+        if let Tag::Double(f) = self {
+            Some(*f)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_u64(&self) -> Option<u64> {
+        if let Tag::UInt64(u) = self {
+            Some(*u)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum ParseError {
     #[error("Unexpected EOF while parsing")]
@@ -35,6 +77,7 @@ pub enum ParseError {
 fn parse_symbol<T: Read>(reader: &mut T) -> Result<Tag, ParseError> {
     let len = reader.read_u16::<BigEndian>()?;
     let mut bytes = Vec::with_capacity(len as usize);
+    bytes.resize(len as usize, 0);
 
     let bytes_read = reader.read(bytes.as_mut_slice())?;
     if bytes_read != len as usize {
