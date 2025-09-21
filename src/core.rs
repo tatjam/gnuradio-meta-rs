@@ -1,15 +1,11 @@
-use std::{
-    cell::OnceCell,
-    collections::BTreeMap,
-    io::{Read, Seek, SeekFrom},
-};
+use std::io::SeekFrom;
 
 /// A date-time with 64 bits for the second and 64 bits for the fractional part,
 /// allowing accurate time-keeping in seconds regardless of origin point, maintaining
 /// sub nano-second precision at any date, and wrapping around in billions of years
 /// into the future.
 ///
-/// Note that using a f32 for timetsamps is inappropiate if you need them relative
+/// Note that using a f32 for timestamps is inappropiate if you need them relative
 /// to UNIX epoch or similar, as nowadays the precision is way less than a second.
 /// Similarly, f64 are not appropiate if you need high precision. As of 2025, the
 /// double precision for a UNIX timestamp is down to 0.3us, which may not be good
@@ -18,16 +14,6 @@ use std::{
 /// If you only need timestamps relative to the start of the file, a f32 or f64 is
 /// probably fine, but this is how GNU Radio gives the data.
 pub type Timestamp = fixed::FixedI128<fixed::types::extra::U64>;
-
-/// Refers to a number of samples
-type SampleCount = u64;
-
-/// Refers to the position of the sample in the file, the mapping of which to a byte
-/// offset can be done with the help of the headers.
-type SampleIdx = u64;
-
-/// Represents an offset in samples from another given sample.
-type SampleOffset = i64;
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum DataType {}
@@ -41,6 +27,10 @@ impl DataType {
         todo!("Implement");
     }
 
+    pub fn converts_to_dtype(&self, other: DataType) -> bool {
+        todo!("Implement");
+    }
+
     pub fn convert_to<T>(&self, bytes: &[u8]) -> T {
         todo!("Implement");
     }
@@ -49,10 +39,12 @@ impl DataType {
 pub struct Error {}
 
 /// Header as read from the GNU radio file
-#[derive(Copy, Clone, PartialEq)]
+#[derive(PartialEq)]
 pub struct Header {
     /// Sample rate of the data
     samp_rate: f64,
+    /// Duration of a sample, computed from samp_rate
+    samp_dur: f64,
     /// Reception time of the first sample of the data, relative to first sample
     rx_time: Timestamp,
     /// Size of the item in bytes
@@ -67,30 +59,9 @@ pub struct Header {
     bytes: u64,
 }
 
-impl Header {
-    fn get_num_samples(&self) -> Option<SampleCount> {
-        todo!("Implement");
-    }
-
-    /// Returns the expected reception time of sample at offset `sample` (which
-    /// may be outside the header just fine) assuming the sample rate is held
-    /// constant until said offset.
-    fn get_sample_time(&self, sample: i64) -> Timestamp {
-        todo!("Implement");
-    }
-}
-
-pub struct StreamTag {}
-
-pub struct SampleMeta {
-    /// Sample rate of the data read
-    samp_rate: f64,
-    /// Reception time of the first sample read
-    rx_time: Timestamp,
-}
-
 /// Which qualities of the current segment are guaranteed to be preserved after the seek?
 /// When in doubt, use All as most GNU Radio files are a single format and sample rate.
+#[derive(PartialEq, Eq)]
 enum SeekPreserve {
     /// Allow seeking into any type of segment
     None,
@@ -110,8 +81,95 @@ enum SeekPreserve {
     Segment,
 }
 
+impl SeekPreserve {
+    /// Returns true if the seek guarantees that the resulting segment data type is equal to the
+    /// one before the seek
+    fn preserves_format(&self) -> bool {
+        *self == SeekPreserve::Format
+            || *self == SeekPreserve::All
+            || *self == SeekPreserve::Segment
+    }
+
+    /// Returns true if the seek guarantees that the resulting segment data type can be converted
+    /// to the one before the seek
+    fn preserves_convertability(&self) -> bool {
+        *self != SeekPreserve::None && *self != SeekPreserve::SampleRate
+    }
+
+    /// Returns true if the seek guarantees that the resulting segment sample rate is equal to the
+    /// one before the seek
+    fn preserves_samplerate(&self) -> bool {
+        *self != SeekPreserve::None
+            && *self != SeekPreserve::Format
+            && *self != SeekPreserve::Convertability
+    }
+}
+
+impl Header {
+    fn get_num_samples(&self) -> u64 {
+        todo!("Implement");
+    }
+
+    /// Returns the expected reception time of sample at offset `sample` (which
+    /// may be outside the header just fine, or even negative) assuming the sample rate is held
+    /// constant until said offset.
+    fn get_sample_time(&self, sample: i64) -> Timestamp {
+        todo!("Implement");
+    }
+
+    /// Gets the duration of a sample at the sample rate of the header
+    fn get_sample_duration(&self) -> f64 {
+        return self.samp_dur;
+    }
+
+    fn is_compatible_with(&self, other: &Header, preserve: SeekPreserve) -> bool {
+        if preserve.preserves_samplerate() && other.samp_rate != self.samp_rate {
+            return false;
+        }
+        if preserve.preserves_format() && other.dtype != self.dtype {
+            return false;
+        }
+        if preserve.preserves_convertability() && !other.dtype.converts_to_dtype(self.dtype) {
+            return false;
+        }
+
+        true
+    }
+
+    /// Returns true if the first sample of this header is received at most with a time error
+    /// of 0.1 * other.get_sample_duration(), to account for floating point errors.
+    fn is_continuation_of(&self, other: &Header) -> bool {
+        let last_sample_t = if other.get_num_samples() == 0 {
+            other.rx_time
+        } else {
+            other.get_sample_time(other.get_num_samples() as i64 - 1)
+        };
+        let diff = self.rx_time.abs_diff(last_sample_t).to_num::<f64>();
+        diff <= 0.1 * other.get_sample_duration()
+    }
+}
+
+pub struct StreamTag {}
+
+pub struct SampleMeta {
+    /// Sample rate of the data read
+    samp_rate: f64,
+    /// Reception time of the first sample read
+    rx_time: Timestamp,
+}
+
 /// This trait allows accessing headers for both attached and dettached files using a common interface.
 pub trait HeaderReader {}
+
+trait SampleReader: HeaderReader {
+    /// Read samples from the binary into the target buffer, performing no conversion, and assuming
+    /// all bytes read are valid samples that are directly convertible to T (i.e. readable with endianness change)
+    fn read_raw<T>(&mut self, tgt: &mut [T]) -> Result<u64, Error>;
+
+    /// Read samples from the binary into the target buffer, performing conversion from the given type
+    /// to be assumed to be stored in the binary samples
+    fn read_conv<T>(&mut self, tgt: &mut [T], dtype: DataType) -> Result<u64, Error>;
+}
 
 /// Similar to Rust's Read + Seek, but obtaining individual samples instead of bytes,
 /// and with radio specific functionality (for example, you are guaranteed to never
@@ -119,19 +177,19 @@ pub trait HeaderReader {}
 ///
 /// For maximum performance, it's recommended to only ever read forwards such that all
 /// disk access is sequential. This yields maximum speed on most systems.
-pub trait SampleReadSeek<T>: HeaderReader {
+pub trait SampleReadSeek<T>: SampleReader {
     /// Gets the header that the next sample that will be read belongs to, or None if
     /// EOF has been reached.
-    fn get_next_read_header(&mut self) -> Option<Header>;
+    fn get_next_read_header(&self) -> Option<&Header>;
 
     /// Gets the header that the last read sample belonged to, or None if no samples
     /// have been read yet, or a seek has been performed.
-    fn get_last_read_header(&mut self) -> Option<Header>;
+    fn get_last_read_header(&self) -> Option<&Header>;
 
     /// Gets the sample position relative to the first sample of the header the
     /// last read sample belongs to. Return None if no sample has been read yet, or a seek
     /// has been performed.
-    fn get_last_read_offset_in_header(&mut self) -> Option<u64>;
+    fn get_last_read_offset_in_header(&self) -> Option<u64>;
 
     fn get_last_read_rx_time(&mut self) -> Option<Timestamp> {
         todo!("Implement");
@@ -140,6 +198,20 @@ pub trait SampleReadSeek<T>: HeaderReader {
         let header = self.get_last_read_header()?;
         header.get_sample_time(offset);
         */
+    }
+
+    /// Returns the pair of current and next header, returning None if either EOF is
+    /// reached, or there's no first header in the file (it's empty). Current header
+    /// will be set = next header if this is the first read from the file.
+    fn get_cur_and_next_header(&self) -> Option<(&Header, &Header)> {
+        let next_read_header = self.get_next_read_header()?; //< Returns if EOF
+        let current_header = match self.get_last_read_header() {
+            // First read from file, where last_read_header is empty, we assume current == next header
+            None => next_read_header,
+            Some(v) => v,
+        };
+
+        Some((current_header, next_read_header))
     }
 
     /// Fills buf from left to right, at most filling it completely. It will stop reading samples
@@ -151,36 +223,46 @@ pub trait SampleReadSeek<T>: HeaderReader {
     /// Returns the number of samples actually read into buf.
     /// This function will never perform conversion, so it's the fastest possible as it
     /// will simply copy from the source file to the destination array.
-    fn read(&mut self, buf: &mut [T]) -> Result<u64, Error> {
+    ///
+    /// If an error is returned, the buffer may have been modified!
+    fn read_samples(&mut self, buf: &mut [T]) -> Result<u64, Error> {
         let mut num_read: u64 = 0;
 
         while num_read < buf.len() as u64 {
-            let next_read_header = match self.get_next_read_header() {
-                Some(data) => data,
-                None => break, // EOF reached!
+            let (cur, next) = match self.get_cur_and_next_header() {
+                None => break,
+                Some(v) => v,
             };
 
-            let current_header = match self.get_last_read_header() {
-                Some(data) => data,
-                None => next_read_header, // First read from file, for logic assume current == next header
-            };
-
-            if next_read_header != current_header {
-                if !next_read_header.dtype.reads_directly_to::<T>() {
+            if cur != next {
+                if !next.dtype.reads_directly_to::<T>() {
                     break; // Not directly readable to T, stop reading
                 }
 
-                if next_read_header.samp_rate != current_header.samp_rate {
-                    break; // Sample rate changed, not allowed, stop reading
+                if cur.is_compatible_with(next, SeekPreserve::All) {
+                    break; // Something is different about the new header, stop reading
                 }
 
-                todo!("Implement!");
-                /*
-                if next_read_header.rx_time != next_expected_rx_time {
-                    break; // The next header supposed a time skip, not allowed, stop reading.
+                if !next.is_continuation_of(cur) {
+                    break; // The segment had a time discontinuity, stop reading
                 }
-                */
             }
+
+            // We are safe to keep reading until the end of the header
+            let num_already_read = self.get_last_read_offset_in_header().unwrap_or(0);
+
+            debug_assert!(
+                num_already_read < cur.get_num_samples(),
+                "Reached end of header, but no skip was triggered"
+            );
+
+            let segment_remain = cur.get_num_samples() - num_already_read;
+            let buff_remain = buf.len() as u64 - num_read;
+
+            let to_read = buff_remain.min(segment_remain);
+            let start = num_read as usize;
+            let end = start + to_read as usize;
+            num_read += self.read_raw::<T>(&mut buf[start..end])?;
         }
 
         Ok(num_read)
