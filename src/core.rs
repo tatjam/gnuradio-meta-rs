@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{Seek, SeekFrom};
-use std::ops::{Deref, DerefMut};
+use std::io::{Read, Seek, SeekFrom};
 use std::rc::Rc;
 
 use crate::pmt::{Tag, parse, parse_maybe_eof};
@@ -208,6 +206,10 @@ impl Header {
     fn get_sample_pos_of_byte(&self, byte: u64) -> u64 {
         todo!("Implement");
     }
+
+    fn from_tags(tag: Tag, extra: Tag) -> Result<Header, MetaFileError> {
+        todo!();
+    }
 }
 
 pub struct StreamTag {}
@@ -270,14 +272,8 @@ pub trait HeaderReader {
     }
 }
 
-pub trait RawSampleReader: Seek {
-    /// Read samples from the binary into the target buffer, performing no conversion, and assuming
-    /// all bytes read are valid samples that are directly convertible to T (i.e. readable with endianness change)
-    fn read_raw<T>(&mut self, tgt: &mut [T]) -> Result<u64, MetaFileError>;
-
-    /// Read samples from the binary into the target buffer, performing conversion from the given type
-    /// to be assumed to be stored in the binary samples
-    fn read_raw_conv<T>(&mut self, tgt: &mut [T], dtype: DataType) -> Result<u64, MetaFileError>;
+fn read_raw<T>(reader: &mut impl Read, target: &mut [T]) -> Result<u64, MetaFileError> {
+    todo!();
 }
 
 /// Similar to Rust's Read + Seek, but obtaining individual samples instead of bytes,
@@ -288,7 +284,7 @@ pub trait RawSampleReader: Seek {
 /// disk access is sequential. This should yield maximum speed on most systems.
 pub trait SampleReadSeek {
     fn get_header_reader_mut(&mut self) -> &mut impl HeaderReader;
-    fn get_sample_reader_mut(&mut self) -> &mut impl RawSampleReader;
+    fn get_sample_reader_mut(&mut self) -> &mut (impl Read + Seek);
 
     /// Gets the header that the last read sample belonged to, or None if no samples
     /// have been read yet, or a seek has been performed.
@@ -380,9 +376,7 @@ pub trait SampleReadSeek {
             let start = num_read as usize;
             let end = start + to_read as usize;
 
-            num_read += self
-                .get_sample_reader_mut()
-                .read_raw::<T>(&mut buf[start..end])?;
+            num_read += read_raw(self.get_sample_reader_mut(), &mut buf[start..end])?;
         }
 
         Ok(num_read)
@@ -438,46 +432,12 @@ pub trait SampleReadSeek {
     }
 }
 
-pub struct BinaryGNURadioFile {
-    file: File,
-}
-
-impl Deref for BinaryGNURadioFile {
-    type Target = File;
-
-    fn deref(&self) -> &Self::Target {
-        &self.file
-    }
-}
-
-impl DerefMut for BinaryGNURadioFile {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.file
-    }
-}
-
-impl RawSampleReader for BinaryGNURadioFile {
-    fn read_raw<T>(&mut self, tgt: &mut [T]) -> Result<u64, MetaFileError> {
-        todo!()
-    }
-
-    fn read_raw_conv<T>(&mut self, tgt: &mut [T], dtype: DataType) -> Result<u64, MetaFileError> {
-        todo!()
-    }
-}
-
-impl Seek for BinaryGNURadioFile {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        self.file.seek(pos)
-    }
-}
-
-pub struct AttachedHeader {
+pub struct AttachedHeader<T: Read + Seek> {
     header_storage: HeaderStorage,
-    file: BinaryGNURadioFile,
+    file: T,
 }
 
-impl HeaderReader for AttachedHeader {
+impl<T: Read + Seek> HeaderReader for AttachedHeader<T> {
     fn get_header_storage_mut(&mut self) -> &mut HeaderStorage {
         &mut self.header_storage
     }
@@ -490,23 +450,23 @@ impl HeaderReader for AttachedHeader {
     }
 }
 
-impl SampleReadSeek for AttachedHeader {
+impl<T: Read + Seek> SampleReadSeek for AttachedHeader<T> {
     fn get_header_reader_mut(&mut self) -> &mut impl HeaderReader {
         self
     }
 
-    fn get_sample_reader_mut(&mut self) -> &mut impl RawSampleReader {
+    fn get_sample_reader_mut(&mut self) -> &mut (impl Read + Seek) {
         &mut self.file
     }
 }
 
-pub struct DettachedHeader {
+pub struct DettachedHeader<B: Read + Seek, H: Read + Seek> {
     header_storage: HeaderStorage,
-    header_file: File,
-    binary_file: BinaryGNURadioFile,
+    header_file: B,
+    binary_file: H,
 }
 
-impl HeaderReader for DettachedHeader {
+impl<B: Read + Seek, H: Read + Seek> HeaderReader for DettachedHeader<B, H> {
     fn get_header_storage_mut(&mut self) -> &mut HeaderStorage {
         &mut self.header_storage
     }
@@ -517,28 +477,59 @@ impl HeaderReader for DettachedHeader {
 
     fn load_next_header(&mut self, start_byte: u64) -> Result<Option<Header>, MetaFileError> {
         // header_file seek is always at the next header, so we can simply
-        let header = match parse_maybe_eof(&mut self.header_file) {
+        let header_tag = match parse_maybe_eof(&mut self.header_file) {
             Ok(Some(v)) => v,
             Ok(None) => return Ok(None),
             Err(e) => return Err(MetaFileError::ParseError(e)),
         };
         let extra = parse(&mut self.header_file)?;
-        todo!()
+        let header = Header::from_tags(header_tag, extra)?;
+        Ok(Some(header))
     }
 }
 
-impl SampleReadSeek for DettachedHeader {
+impl<B: Read + Seek, H: Read + Seek> SampleReadSeek for DettachedHeader<B, H> {
     fn get_header_reader_mut(&mut self) -> &mut impl HeaderReader {
         self
     }
 
-    fn get_sample_reader_mut(&mut self) -> &mut impl RawSampleReader {
+    fn get_sample_reader_mut(&mut self) -> &mut (impl Read + Seek) {
         &mut self.binary_file
     }
 }
 
 #[cfg(test)]
 mod core_tests {
+    use std::fs::File;
+
+    /// Returns the binary file (always) and the header file if it exists
+    fn get_or_run_gnuradio(file: &'static str) -> (File, Option<File>) {
+        use std::path::Path;
+        use std::process::Command;
+
+        let src_path = format!("test_files/{}.grc", file);
+        let dst_path = format!("target/test_files/{}", file);
+        // not always generated
+        let dst_path_hdr = format!("target/test_files/{}.grh", file);
+
+        let path = Path::new(file);
+        if !path.exists() {
+            let out = Command::new("gnuradio-companion")
+                .args(&["--run", src_path.as_str(), "--out_file", dst_path.as_str()])
+                .output()
+                .expect(format!("failed to run GNU radio on {}", file).as_str());
+            if !out.status.success() {
+                panic!("GNU radio failed on file {}", file)
+            }
+        }
+
+        (File::open(dst_path).unwrap(), File::open(dst_path_hdr).ok())
+    }
+
+    #[test]
+    fn read_byte_samples_attached() {
+        let (file, _) = get_or_run_gnuradio("bytes_increasing");
+    }
 
     #[test]
     fn read_complex_samples_attached() {}
