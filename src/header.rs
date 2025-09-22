@@ -1,5 +1,5 @@
 use crate::pmt::{Tag, Timestamp};
-use std::rc::Rc;
+use std::{marker::PhantomData, rc::Rc};
 use thiserror::Error;
 
 /// Which qualities of the current segment are guaranteed to be preserved after the seek?
@@ -80,6 +80,8 @@ pub enum DataType {
 
 impl DataType {
     pub fn reads_directly_to<T>(&self) -> bool {
+        // To avoid cargo error, remove
+        let _: PhantomData<T>;
         todo!("Implement");
     }
 
@@ -190,7 +192,7 @@ impl Header {
         let tag = if let Tag::Dict(as_dict) = tag {
             as_dict
         } else {
-            return Err(InvalidHeaderError::HeaderNotDictionary.into());
+            return Err(InvalidHeaderError::HeaderNotDictionary);
         };
 
         println!("Read header from tag {:?}", tag);
@@ -217,7 +219,7 @@ impl Header {
                     .ok_or(InvalidHeaderError::MissingField("rx_time fractional"))?;
                 (a, b)
             }
-            _ => return Err(InvalidHeaderError::WrongTypeField("rx_time").into()),
+            _ => return Err(InvalidHeaderError::WrongTypeField("rx_time")),
         };
 
         let rx_time_secs = rx_time_a

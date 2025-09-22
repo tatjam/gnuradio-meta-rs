@@ -1,9 +1,8 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
-use std::rc::Rc;
 
 use crate::header::{Header, InvalidHeaderError, SeekPreserve};
-use crate::pmt::{Tag, Timestamp, parse, parse_maybe_eof};
+use crate::pmt::{Timestamp, parse, parse_maybe_eof};
 use thiserror::Error;
 
 #[derive(Default)]
@@ -358,9 +357,9 @@ mod core_tests {
 
         // Compile the file
         let cout = Command::new("grcc")
-            .args(&[src_path.as_str(), "-o", "target/test_files/"])
+            .args([src_path.as_str(), "-o", "target/test_files/"])
             .output()
-            .expect(format!("failed to run GNU radio compiler on {}", src_path).as_str());
+            .unwrap_or_else(|_| panic!("failed to run GNU radio compiler on {}", src_path));
         if !cout.status.success() {
             panic!(
                 "GNU radio compiler failed on file {}, error: {}",
@@ -370,9 +369,9 @@ mod core_tests {
         }
 
         let out = Command::new("python3")
-            .args(&[src_path_py.as_str(), "--out", dst_path.as_str()])
+            .args([src_path_py.as_str(), "--out", dst_path.as_str()])
             .output()
-            .expect(format!("failed to run GNU radio on {}", file).as_str());
+            .unwrap_or_else(|_| panic!("failed to run GNU radio on {}", src_path));
         if !out.status.success() {
             panic!(
                 "GNU radio failed on file {}, error: {}",
@@ -393,8 +392,8 @@ mod core_tests {
         let num_read = reader.read_samples(&mut samples).unwrap();
         // Basic sample reading checks
         assert_eq!(num_read, 256);
-        for i in 0..256 {
-            assert_eq!(samples[i], i as u8);
+        for (i, &samp) in samples.iter().enumerate() {
+            assert_eq!(samp, i as u8);
         }
 
         // Public header interface

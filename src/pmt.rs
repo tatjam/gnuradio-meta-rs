@@ -91,8 +91,8 @@ pub enum ParseError {
 
 fn parse_symbol<T: Read>(reader: &mut T) -> Result<Tag, ParseError> {
     let len = reader.read_u16::<BigEndian>()?;
-    let mut bytes = Vec::with_capacity(len as usize);
-    bytes.resize(len as usize, 0);
+    // TODO: This could be a target for an easy DOS attack! Limit len to prevent massive allocation.
+    let mut bytes = vec![0; len as usize];
 
     let bytes_read = reader.read(bytes.as_mut_slice())?;
     if bytes_read != len as usize {
