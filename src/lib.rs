@@ -41,4 +41,5 @@
 //! You can then read it from each header as a Timestamp value in Rust.
 //!
 pub mod core;
+mod header;
 mod pmt;

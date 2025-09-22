@@ -7,6 +7,21 @@ use thiserror::Error;
 
 type StringToTag = HashMap<String, Tag>;
 
+/// A date-time with 64 bits for the second and 64 bits for the fractional part,
+/// allowing accurate time-keeping in seconds regardless of origin point, maintaining
+/// sub nano-second precision at any date, and wrapping around in billions of years
+/// into the future.
+///
+/// Note that using a f32 for timestamps is inappropiate if you need them relative
+/// to UNIX epoch or similar, as nowadays the precision is way less than a second.
+/// Similarly, f64 are not appropiate if you need high precision. As of 2025, the
+/// double precision for a UNIX timestamp is down to 0.3us, which may not be good
+/// enough in some high precision radio applications, and will only get worse!
+///
+/// If you only need timestamps relative to the start of the file, a f32 or f64 is
+/// probably fine, but this is how GNU Radio gives the data.
+pub type Timestamp = fixed::FixedI128<fixed::types::extra::U64>;
+
 #[derive(PartialEq, Debug)]
 pub enum Tag {
     Bool(bool),

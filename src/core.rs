@@ -2,23 +2,9 @@ use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::rc::Rc;
 
-use crate::pmt::{Tag, parse, parse_maybe_eof};
+use crate::header::{Header, InvalidHeaderError, SeekPreserve};
+use crate::pmt::{Tag, Timestamp, parse, parse_maybe_eof};
 use thiserror::Error;
-
-/// A date-time with 64 bits for the second and 64 bits for the fractional part,
-/// allowing accurate time-keeping in seconds regardless of origin point, maintaining
-/// sub nano-second precision at any date, and wrapping around in billions of years
-/// into the future.
-///
-/// Note that using a f32 for timestamps is inappropiate if you need them relative
-/// to UNIX epoch or similar, as nowadays the precision is way less than a second.
-/// Similarly, f64 are not appropiate if you need high precision. As of 2025, the
-/// double precision for a UNIX timestamp is down to 0.3us, which may not be good
-/// enough in some high precision radio applications, and will only get worse!
-///
-/// If you only need timestamps relative to the start of the file, a f32 or f64 is
-/// probably fine, but this is how GNU Radio gives the data.
-pub type Timestamp = fixed::FixedI128<fixed::types::extra::U64>;
 
 #[derive(Default)]
 pub struct HeaderStorage {
@@ -44,42 +30,6 @@ impl HeaderStorage {
     }
 }
 
-/// Note all of these can be "complex", which duplicates each entry as a complex number,
-/// and makes them directly convertible to Complex<x>.
-#[derive(Copy, Clone, PartialEq, Debug)]
-pub enum DataType {
-    /// Directly convertible to i8
-    Byte,
-    /// Directly convertible to i16
-    Short,
-    /// Directly convertible to i32
-    Int,
-    // Long (not possible from GNU Radio)
-    // LongLong, (not possible from GNU Radio)
-    /// Directly convertible to f32
-    Float,
-    /// Directly convertible to f64
-    Double,
-}
-
-impl DataType {
-    pub fn reads_directly_to<T>(&self) -> bool {
-        todo!("Implement");
-    }
-
-    pub fn converts_to<T>(&self) -> bool {
-        todo!("Implement");
-    }
-
-    pub fn converts_to_dtype(&self, other: DataType) -> bool {
-        todo!("Implement");
-    }
-
-    pub fn convert_to<T>(&self, bytes: &[u8]) -> T {
-        todo!("Implement");
-    }
-}
-
 #[derive(Error, Debug)]
 pub enum MetaFileError {
     #[error("Reader I/O error")]
@@ -89,176 +39,6 @@ pub enum MetaFileError {
     #[error("Invalid header error")]
     InvalidHeaderError(#[from] InvalidHeaderError),
 }
-
-#[derive(Error, Debug)]
-pub enum InvalidHeaderError {
-    #[error("Header was not a dictionary")]
-    HeaderNotDictionary,
-    #[error("Missing field {0} in header")]
-    MissingField(&'static str),
-    #[error("Field {0} was present in header, but was of unexpected type")]
-    WrongTypeField(&'static str),
-}
-
-/// Header as read from the GNU radio file
-#[derive(PartialEq, Debug, Clone)]
-pub struct Header {
-    /// Sample rate of the data
-    samp_rate: f64,
-    /// Duration of a sample, computed from samp_rate
-    samp_dur: f64,
-    /// Reception time of the first sample of the data, relative to first sample
-    rx_time: Timestamp,
-    /// Size of the item in bytes
-    size: u32,
-    /// Type of the data
-    dtype: DataType,
-    /// Is the data complex?
-    cplx: bool,
-    /// Offset to the first byte of data in this header's segment
-    strt: u64,
-    /// Size in bytes of the data in this header's segment
-    bytes: u64,
-
-    extra_dict: Rc<Tag>,
-
-    /// Absolute position of the first byte of the data from the start of the file,
-    /// computed by ourselves
-    abs_pos: u64,
-
-    /// Absolute position of the first byte of the HEADER in the file (either attached or dettached),
-    /// computed by ourselves
-    pos_in_file: u64,
-}
-
-/// Which qualities of the current segment are guaranteed to be preserved after the seek?
-/// When in doubt, use All as most GNU Radio files are a single format and sample rate.
-#[derive(PartialEq, Eq)]
-pub enum SeekPreserve {
-    /// Allow seeking into any type of segment
-    None,
-    /// Allow seeking into segments which have the same format as the current segment
-    Format,
-    /// Allow seeking into segments which can be converted to the current segment's format
-    /// (Implies format)
-    Convertability,
-    /// Allow seeking into segments which have the same sample rate as the current segment
-    SampleRate,
-    /// Allow seeking into segments which have the same sample rate, and format which can be converted
-    /// to the one of the current segment
-    SampleRateAndConvertability,
-    /// Allow seeking into segments which have the same sample rate and format as the current one
-    All,
-    /// Only seek within the current segment. Same guarantees as All, but more restrictive.
-    Segment,
-}
-
-impl SeekPreserve {
-    /// Returns true if the seek guarantees that the resulting segment data type is equal to the
-    /// one before the seek
-    fn preserves_format(&self) -> bool {
-        *self == SeekPreserve::Format
-            || *self == SeekPreserve::All
-            || *self == SeekPreserve::Segment
-    }
-
-    /// Returns true if the seek guarantees that the resulting segment data type can be converted
-    /// to the one before the seek
-    fn preserves_convertability(&self) -> bool {
-        *self != SeekPreserve::None && *self != SeekPreserve::SampleRate
-    }
-
-    /// Returns true if the seek guarantees that the resulting segment sample rate is equal to the
-    /// one before the seek
-    fn preserves_samplerate(&self) -> bool {
-        *self != SeekPreserve::None
-            && *self != SeekPreserve::Format
-            && *self != SeekPreserve::Convertability
-    }
-}
-
-impl Header {
-    fn get_num_samples(&self) -> u64 {
-        todo!("Implement");
-    }
-
-    /// Returns the expected reception time of sample at offset `sample` (which
-    /// may be outside the header just fine, or even negative) assuming the sample rate is held
-    /// constant until said offset.
-    fn get_sample_time(&self, sample: i64) -> Timestamp {
-        todo!("Implement");
-    }
-
-    /// Gets the duration of a sample at the sample rate of the header
-    fn get_sample_duration(&self) -> f64 {
-        self.samp_dur
-    }
-
-    fn is_compatible_with(&self, other: &Header, preserve: SeekPreserve) -> bool {
-        if preserve.preserves_samplerate() && other.samp_rate != self.samp_rate {
-            return false;
-        }
-        if preserve.preserves_format() && other.dtype != self.dtype {
-            return false;
-        }
-        if preserve.preserves_convertability() && !other.dtype.converts_to_dtype(self.dtype) {
-            return false;
-        }
-
-        true
-    }
-
-    /// Returns true if the first sample of this header is received at most with a time error
-    /// of 0.1 * other.get_sample_duration(), to account for floating point errors.
-    fn is_continuation_of(&self, other: &Header) -> bool {
-        let last_sample_t = if other.get_num_samples() == 0 {
-            other.rx_time
-        } else {
-            other.get_sample_time(other.get_num_samples() as i64 - 1)
-        };
-        let diff = self.rx_time.abs_diff(last_sample_t).to_num::<f64>();
-        diff <= 0.1 * other.get_sample_duration()
-    }
-
-    fn get_sample_pos_of_byte(&self, byte: u64) -> u64 {
-        todo!("Implement");
-    }
-
-    fn from_tags(tag: Tag, extra: Tag) -> Result<Header, MetaFileError> {
-        let tag = if let Tag::Dict(as_dict) = tag {
-            as_dict
-        } else {
-            return Err(InvalidHeaderError::HeaderNotDictionary.into());
-        };
-
-        println!("Read header from tag {:?}", tag);
-        println!("Extra: {:?}", extra);
-
-        let samp_rate = tag
-            .get("rx_rate")
-            .ok_or(InvalidHeaderError::MissingField("rx_rate"))?
-            .get_f64()
-            .ok_or(InvalidHeaderError::WrongTypeField("rx_rate"))?;
-
-        let samp_dur = 1.0 / samp_rate;
-
-        Ok(Header {
-            samp_rate,
-            samp_dur,
-            rx_time: todo!(),
-            size: todo!(),
-            dtype: todo!(),
-            cplx: todo!(),
-            strt: todo!(),
-            bytes: todo!(),
-            extra_dict: todo!(),
-            abs_pos: todo!(),
-            pos_in_file: todo!(),
-        })
-    }
-}
-
-pub struct StreamTag {}
 
 pub struct SampleMeta {
     /// Sample rate of the data read
@@ -273,7 +53,8 @@ pub trait HeaderReader {
     fn get_header_storage(&self) -> &HeaderStorage;
 
     /// Load the next header from the file. start_byte is the first byte of said header in the binary file
-    /// (thus only used in AttachedHeader mode!). Return None if no more to read.
+    /// (i.e. the first data of segment in dettached, and the first byte of header in attached).
+    /// Return None if no more to read.
     fn load_next_header(&mut self, start_byte: u64) -> Result<Option<Header>, MetaFileError>;
 
     #[doc(hidden)]
@@ -446,13 +227,6 @@ pub trait SampleReadSeek {
         todo!("Implement");
     }
 
-    /// Returns stream tags applicable to samples in previous call to read
-    fn get_last_read_tags(&self) -> Vec<StreamTag> {
-        // DO NOT ALLOCATE DURING READ, instead just store first and last sample and
-        // perform the "complicated" tag extraction here
-        todo!("Implement");
-    }
-
     /// Seeks within the file, preserving certain qualities of the current segment as
     /// given in preserve. Returns the current position in samples from the start of the file, or
     /// errors if the seek could not be performed, leaving the position unmodified.
@@ -511,7 +285,7 @@ impl<T: Read + Seek> HeaderReader for AttachedHeader<T> {
             Err(e) => return Err(MetaFileError::ParseError(e)),
         };
         let extra = parse(&mut self.file)?;
-        let header = Header::from_tags(header_tag, extra)?;
+        let header = Header::from_tags(start_byte, header_tag, extra)?;
         self.file.seek(SeekFrom::Start(old_pos))?;
 
         Ok(Some(header))
@@ -551,7 +325,7 @@ impl<B: Read + Seek, H: Read + Seek> HeaderReader for DettachedHeader<B, H> {
             Err(e) => return Err(MetaFileError::ParseError(e)),
         };
         let extra = parse(&mut self.header_file)?;
-        let header = Header::from_tags(header_tag, extra)?;
+        let header = Header::from_tags(start_byte, header_tag, extra)?;
         Ok(Some(header))
     }
 }
