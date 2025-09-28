@@ -1,3 +1,4 @@
+use num_complex::Complex;
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
 
@@ -14,12 +15,31 @@ pub struct HeaderStorage {
 
 impl HeaderStorage {
     /// Gets the header applicable to a byte in the binary file (byte) or None if not loaded.
+    /// Assumes all previous headers have already been loaded!
     fn get_header_for_byte(&self, byte: u64) -> Option<&Header> {
         use std::ops::Bound::*;
-        let last = self.store.range((Unbounded, Excluded(byte))).next()?;
-        // If last is present, it may not be correct just yet, as it could be a too early header
-        let max_byte = last.1.abs_pos + last.1.bytes;
-        if byte < max_byte { Some(last.1) } else { None }
+        if self.store.len() == 0 {
+            return None;
+        }
+        // mut because of use of peek
+        let mut last = self.store.range((Unbounded, Excluded(byte))).peekable();
+        let last_or_first = if last.peek().is_none() {
+            self.store
+                .iter()
+                .next()
+                .expect("Checked before that self.store.len() != 0")
+                .1
+        } else {
+            last.peek().expect("Just checked on the if").1
+        };
+
+        // If last_or_first is present, it may not be correct just yet, as it could be a too early header
+        let max_byte = last_or_first.abs_pos + last_or_first.bytes;
+        if byte < max_byte {
+            Some(last_or_first)
+        } else {
+            None
+        }
     }
 
     fn add_header_for_byte(&mut self, byte: u64, header: Header) {
@@ -169,7 +189,7 @@ pub trait SampleReadSeek {
     /// will simply copy from the source file to the destination array.
     ///
     /// If an error is returned, the buffer may have been modified!
-    fn read_samples<T>(&mut self, buf: &mut [T]) -> Result<u64, MetaFileError> {
+    fn read_samples<T: 'static>(&mut self, buf: &mut [T]) -> Result<u64, MetaFileError> {
         let mut num_read: u64 = 0;
 
         while num_read < buf.len() as u64 {
@@ -178,7 +198,7 @@ pub trait SampleReadSeek {
                 None => break, // EOF or empty file
             };
 
-            if !appl_header.dtype.reads_directly_to::<T>() {
+            if !appl_header.dtype.reads_directly_to::<T>(appl_header.cplx) {
                 break; // Not directly readable to T, stop reading
             }
 

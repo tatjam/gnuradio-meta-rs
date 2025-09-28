@@ -1,5 +1,6 @@
 use crate::pmt::{Tag, Timestamp};
-use std::{marker::PhantomData, rc::Rc};
+use num_complex::Complex;
+use std::{any::TypeId, marker::PhantomData, rc::Rc};
 use thiserror::Error;
 
 /// Which qualities of the current segment are guaranteed to be preserved after the seek?
@@ -79,21 +80,101 @@ pub enum DataType {
 }
 
 impl DataType {
-    pub fn reads_directly_to<T>(&self) -> bool {
-        // To avoid cargo error, remove
-        let _: PhantomData<T>;
+    pub fn is_floating(&self) -> bool {
+        return *self == DataType::Float || *self == DataType::Double;
+    }
+
+    /// Only returns true if the type is directly representable as the target type, including signed-ness
+    /// and number of bits of the type.
+    pub fn reads_directly_to<T: 'static>(&self, complex: bool) -> bool {
+        if complex {
+            match *self {
+                DataType::Byte => TypeId::of::<T>() == TypeId::of::<Complex<i8>>(),
+                DataType::Short => TypeId::of::<T>() == TypeId::of::<Complex<i16>>(),
+                DataType::Int => TypeId::of::<T>() == TypeId::of::<Complex<i32>>(),
+                DataType::Float => TypeId::of::<T>() == TypeId::of::<Complex<f32>>(),
+                DataType::Double => TypeId::of::<T>() == TypeId::of::<Complex<f64>>(),
+            }
+        } else {
+            match *self {
+                DataType::Byte => TypeId::of::<T>() == TypeId::of::<i8>(),
+                DataType::Short => TypeId::of::<T>() == TypeId::of::<i16>(),
+                DataType::Int => TypeId::of::<T>() == TypeId::of::<i32>(),
+                DataType::Float => TypeId::of::<T>() == TypeId::of::<f32>(),
+                DataType::Double => TypeId::of::<T>() == TypeId::of::<f64>(),
+            }
+        }
+    }
+
+    /// No edge cases, we only support up-casting among the basic types from GNU Radio, and
+    /// floating point conversion (lossy conversion from f64 -> f32 is allowed!)
+    pub fn converts_to<T: 'static>(&self, complex: bool) -> bool {
+        if complex {
+            match *self {
+                DataType::Byte => {
+                    TypeId::of::<T>() == TypeId::of::<Complex<f64>>()
+                        || TypeId::of::<T>() == TypeId::of::<Complex<f32>>()
+                        || TypeId::of::<T>() == TypeId::of::<Complex<i32>>()
+                        || TypeId::of::<T>() == TypeId::of::<Complex<i16>>()
+                        || TypeId::of::<T>() == TypeId::of::<Complex<i8>>()
+                }
+                DataType::Short => {
+                    TypeId::of::<T>() == TypeId::of::<Complex<f64>>()
+                        || TypeId::of::<T>() == TypeId::of::<Complex<f32>>()
+                        || TypeId::of::<T>() == TypeId::of::<Complex<i32>>()
+                        || TypeId::of::<T>() == TypeId::of::<Complex<i16>>()
+                }
+                DataType::Int => {
+                    TypeId::of::<T>() == TypeId::of::<Complex<f64>>()
+                        || TypeId::of::<T>() == TypeId::of::<Complex<f32>>()
+                        || TypeId::of::<T>() == TypeId::of::<Complex<i32>>()
+                }
+                DataType::Float => {
+                    TypeId::of::<T>() == TypeId::of::<Complex<f64>>()
+                        || TypeId::of::<T>() == TypeId::of::<Complex<f32>>()
+                }
+                DataType::Double => {
+                    TypeId::of::<T>() == TypeId::of::<Complex<f64>>()
+                        || TypeId::of::<T>() == TypeId::of::<Complex<f32>>()
+                }
+            }
+        } else {
+            match *self {
+                DataType::Byte => {
+                    TypeId::of::<T>() == TypeId::of::<f64>()
+                        || TypeId::of::<T>() == TypeId::of::<f32>()
+                        || TypeId::of::<T>() == TypeId::of::<i32>()
+                        || TypeId::of::<T>() == TypeId::of::<i16>()
+                        || TypeId::of::<T>() == TypeId::of::<i8>()
+                }
+                DataType::Short => {
+                    TypeId::of::<T>() == TypeId::of::<f64>()
+                        || TypeId::of::<T>() == TypeId::of::<f32>()
+                        || TypeId::of::<T>() == TypeId::of::<i32>()
+                        || TypeId::of::<T>() == TypeId::of::<i16>()
+                }
+                DataType::Int => {
+                    TypeId::of::<T>() == TypeId::of::<f64>()
+                        || TypeId::of::<T>() == TypeId::of::<f32>()
+                        || TypeId::of::<T>() == TypeId::of::<i32>()
+                }
+                DataType::Float => {
+                    TypeId::of::<T>() == TypeId::of::<f64>()
+                        || TypeId::of::<T>() == TypeId::of::<f32>()
+                }
+                DataType::Double => {
+                    TypeId::of::<T>() == TypeId::of::<f64>()
+                        || TypeId::of::<T>() == TypeId::of::<f32>()
+                }
+            }
+        }
+    }
+
+    pub fn converts_to_dtype(&self, other: &Self) -> bool {
         todo!("Implement");
     }
 
-    pub fn converts_to<T>(&self) -> bool {
-        todo!("Implement");
-    }
-
-    pub fn converts_to_dtype(&self, other: DataType) -> bool {
-        todo!("Implement");
-    }
-
-    pub fn convert_to<T>(&self, bytes: &[u8]) -> T {
+    pub fn read_from_bytes<T>(&self, bytes: &[u8]) -> T {
         todo!("Implement");
     }
 
@@ -161,7 +242,7 @@ impl Header {
         if preserve.preserves_format() && other.dtype != self.dtype {
             return false;
         }
-        if preserve.preserves_convertability() && !other.dtype.converts_to_dtype(self.dtype) {
+        if preserve.preserves_convertability() && !other.dtype.converts_to_dtype(&self.dtype) {
             return false;
         }
 
@@ -276,5 +357,366 @@ impl Header {
             abs_pos: strt,
             pos_in_file: byte_in_file,
         })
+    }
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::*;
+
+    // Some very tedious tests ahead...
+    #[test]
+    fn dtype_byte() {
+        assert!(!DataType::Byte.is_floating());
+
+        assert!(DataType::Byte.reads_directly_to::<i8>(false));
+        assert!(!DataType::Byte.reads_directly_to::<u8>(false));
+        assert!(!DataType::Byte.reads_directly_to::<i16>(false));
+        assert!(!DataType::Byte.reads_directly_to::<u16>(false));
+        assert!(!DataType::Byte.reads_directly_to::<i32>(false));
+        assert!(!DataType::Byte.reads_directly_to::<u32>(false));
+        assert!(!DataType::Byte.reads_directly_to::<i64>(false));
+        assert!(!DataType::Byte.reads_directly_to::<u64>(false));
+        assert!(!DataType::Byte.reads_directly_to::<f32>(false));
+        assert!(!DataType::Byte.reads_directly_to::<f64>(false));
+
+        assert!(DataType::Byte.converts_to::<i8>(false));
+        assert!(!DataType::Byte.converts_to::<u8>(false));
+        assert!(DataType::Byte.converts_to::<i16>(false));
+        assert!(!DataType::Byte.converts_to::<u16>(false));
+        assert!(DataType::Byte.converts_to::<i32>(false));
+        assert!(!DataType::Byte.converts_to::<u32>(false));
+        assert!(!DataType::Byte.converts_to::<i64>(false));
+        assert!(!DataType::Byte.converts_to::<u64>(false));
+        assert!(DataType::Byte.converts_to::<f32>(false));
+        assert!(DataType::Byte.converts_to::<f64>(false));
+
+        assert!(DataType::Byte.reads_directly_to::<Complex<i8>>(true));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<u8>>(true));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<i16>>(true));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<u16>>(true));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<i32>>(true));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<u32>>(true));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<i64>>(true));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<u64>>(true));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<f32>>(true));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<f64>>(true));
+
+        assert!(DataType::Byte.converts_to::<Complex<i8>>(true));
+        assert!(!DataType::Byte.converts_to::<Complex<u8>>(true));
+        assert!(DataType::Byte.converts_to::<Complex<i16>>(true));
+        assert!(!DataType::Byte.converts_to::<Complex<u16>>(true));
+        assert!(DataType::Byte.converts_to::<Complex<i32>>(true));
+        assert!(!DataType::Byte.converts_to::<Complex<u32>>(true));
+        assert!(!DataType::Byte.converts_to::<Complex<i64>>(true));
+        assert!(!DataType::Byte.converts_to::<Complex<u64>>(true));
+        assert!(DataType::Byte.converts_to::<Complex<f32>>(true));
+        assert!(DataType::Byte.converts_to::<Complex<f64>>(true));
+
+        assert!(!DataType::Byte.reads_directly_to::<Complex<i8>>(false));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<u8>>(false));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<i16>>(false));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<u16>>(false));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<i32>>(false));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<u32>>(false));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<i64>>(false));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<u64>>(false));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<f32>>(false));
+        assert!(!DataType::Byte.reads_directly_to::<Complex<f64>>(false));
+
+        assert!(!DataType::Byte.reads_directly_to::<i8>(true));
+        assert!(!DataType::Byte.reads_directly_to::<u8>(true));
+        assert!(!DataType::Byte.reads_directly_to::<i16>(true));
+        assert!(!DataType::Byte.reads_directly_to::<u16>(true));
+        assert!(!DataType::Byte.reads_directly_to::<i32>(true));
+        assert!(!DataType::Byte.reads_directly_to::<u32>(true));
+        assert!(!DataType::Byte.reads_directly_to::<i64>(true));
+        assert!(!DataType::Byte.reads_directly_to::<u64>(true));
+        assert!(!DataType::Byte.reads_directly_to::<f32>(true));
+        assert!(!DataType::Byte.reads_directly_to::<f64>(true));
+    }
+
+    #[test]
+    fn dtype_short() {
+        assert!(!DataType::Short.is_floating());
+
+        assert!(!DataType::Short.reads_directly_to::<i8>(false));
+        assert!(!DataType::Short.reads_directly_to::<u8>(false));
+        assert!(DataType::Short.reads_directly_to::<i16>(false));
+        assert!(!DataType::Short.reads_directly_to::<u16>(false));
+        assert!(!DataType::Short.reads_directly_to::<i32>(false));
+        assert!(!DataType::Short.reads_directly_to::<u32>(false));
+        assert!(!DataType::Short.reads_directly_to::<i64>(false));
+        assert!(!DataType::Short.reads_directly_to::<u64>(false));
+        assert!(!DataType::Short.reads_directly_to::<f32>(false));
+        assert!(!DataType::Short.reads_directly_to::<f64>(false));
+
+        assert!(!DataType::Short.converts_to::<i8>(false));
+        assert!(!DataType::Short.converts_to::<u8>(false));
+        assert!(DataType::Short.converts_to::<i16>(false));
+        assert!(!DataType::Short.converts_to::<u16>(false));
+        assert!(DataType::Short.converts_to::<i32>(false));
+        assert!(!DataType::Short.converts_to::<u32>(false));
+        assert!(!DataType::Short.converts_to::<i64>(false));
+        assert!(!DataType::Short.converts_to::<u64>(false));
+        assert!(DataType::Short.converts_to::<f32>(false));
+        assert!(DataType::Short.converts_to::<f64>(false));
+
+        assert!(!DataType::Short.reads_directly_to::<Complex<i8>>(true));
+        assert!(!DataType::Short.reads_directly_to::<Complex<u8>>(true));
+        assert!(DataType::Short.reads_directly_to::<Complex<i16>>(true));
+        assert!(!DataType::Short.reads_directly_to::<Complex<u16>>(true));
+        assert!(!DataType::Short.reads_directly_to::<Complex<i32>>(true));
+        assert!(!DataType::Short.reads_directly_to::<Complex<u32>>(true));
+        assert!(!DataType::Short.reads_directly_to::<Complex<i64>>(true));
+        assert!(!DataType::Short.reads_directly_to::<Complex<u64>>(true));
+        assert!(!DataType::Short.reads_directly_to::<Complex<f32>>(true));
+        assert!(!DataType::Short.reads_directly_to::<Complex<f64>>(true));
+
+        assert!(!DataType::Short.converts_to::<Complex<i8>>(true));
+        assert!(!DataType::Short.converts_to::<Complex<u8>>(true));
+        assert!(DataType::Short.converts_to::<Complex<i16>>(true));
+        assert!(!DataType::Short.converts_to::<Complex<u16>>(true));
+        assert!(DataType::Short.converts_to::<Complex<i32>>(true));
+        assert!(!DataType::Short.converts_to::<Complex<u32>>(true));
+        assert!(!DataType::Short.converts_to::<Complex<i64>>(true));
+        assert!(!DataType::Short.converts_to::<Complex<u64>>(true));
+        assert!(DataType::Short.converts_to::<Complex<f32>>(true));
+        assert!(DataType::Short.converts_to::<Complex<f64>>(true));
+
+        assert!(!DataType::Short.reads_directly_to::<Complex<i8>>(false));
+        assert!(!DataType::Short.reads_directly_to::<Complex<u8>>(false));
+        assert!(!DataType::Short.reads_directly_to::<Complex<i16>>(false));
+        assert!(!DataType::Short.reads_directly_to::<Complex<u16>>(false));
+        assert!(!DataType::Short.reads_directly_to::<Complex<i32>>(false));
+        assert!(!DataType::Short.reads_directly_to::<Complex<u32>>(false));
+        assert!(!DataType::Short.reads_directly_to::<Complex<i64>>(false));
+        assert!(!DataType::Short.reads_directly_to::<Complex<u64>>(false));
+        assert!(!DataType::Short.reads_directly_to::<Complex<f32>>(false));
+        assert!(!DataType::Short.reads_directly_to::<Complex<f64>>(false));
+
+        assert!(!DataType::Short.reads_directly_to::<i8>(true));
+        assert!(!DataType::Short.reads_directly_to::<u8>(true));
+        assert!(!DataType::Short.reads_directly_to::<i16>(true));
+        assert!(!DataType::Short.reads_directly_to::<u16>(true));
+        assert!(!DataType::Short.reads_directly_to::<i32>(true));
+        assert!(!DataType::Short.reads_directly_to::<u32>(true));
+        assert!(!DataType::Short.reads_directly_to::<i64>(true));
+        assert!(!DataType::Short.reads_directly_to::<u64>(true));
+        assert!(!DataType::Short.reads_directly_to::<f32>(true));
+        assert!(!DataType::Short.reads_directly_to::<f64>(true));
+    }
+
+    #[test]
+    fn dtype_int() {
+        assert!(!DataType::Int.is_floating());
+
+        assert!(!DataType::Int.reads_directly_to::<i8>(false));
+        assert!(!DataType::Int.reads_directly_to::<u8>(false));
+        assert!(!DataType::Int.reads_directly_to::<i16>(false));
+        assert!(!DataType::Int.reads_directly_to::<u16>(false));
+        assert!(DataType::Int.reads_directly_to::<i32>(false));
+        assert!(!DataType::Int.reads_directly_to::<u32>(false));
+        assert!(!DataType::Int.reads_directly_to::<i64>(false));
+        assert!(!DataType::Int.reads_directly_to::<u64>(false));
+        assert!(!DataType::Int.reads_directly_to::<f32>(false));
+        assert!(!DataType::Int.reads_directly_to::<f64>(false));
+
+        assert!(!DataType::Int.converts_to::<i8>(false));
+        assert!(!DataType::Int.converts_to::<u8>(false));
+        assert!(!DataType::Int.converts_to::<i16>(false));
+        assert!(!DataType::Int.converts_to::<u16>(false));
+        assert!(DataType::Int.converts_to::<i32>(false));
+        assert!(!DataType::Int.converts_to::<u32>(false));
+        assert!(!DataType::Int.converts_to::<i64>(false));
+        assert!(!DataType::Int.converts_to::<u64>(false));
+        assert!(DataType::Int.converts_to::<f32>(false));
+        assert!(DataType::Int.converts_to::<f64>(false));
+
+        assert!(!DataType::Int.reads_directly_to::<Complex<i8>>(true));
+        assert!(!DataType::Int.reads_directly_to::<Complex<u8>>(true));
+        assert!(!DataType::Int.reads_directly_to::<Complex<i16>>(true));
+        assert!(!DataType::Int.reads_directly_to::<Complex<u16>>(true));
+        assert!(DataType::Int.reads_directly_to::<Complex<i32>>(true));
+        assert!(!DataType::Int.reads_directly_to::<Complex<u32>>(true));
+        assert!(!DataType::Int.reads_directly_to::<Complex<i64>>(true));
+        assert!(!DataType::Int.reads_directly_to::<Complex<u64>>(true));
+        assert!(!DataType::Int.reads_directly_to::<Complex<f32>>(true));
+        assert!(!DataType::Int.reads_directly_to::<Complex<f64>>(true));
+
+        assert!(!DataType::Int.converts_to::<Complex<i8>>(true));
+        assert!(!DataType::Int.converts_to::<Complex<u8>>(true));
+        assert!(!DataType::Int.converts_to::<Complex<i16>>(true));
+        assert!(!DataType::Int.converts_to::<Complex<u16>>(true));
+        assert!(DataType::Int.converts_to::<Complex<i32>>(true));
+        assert!(!DataType::Int.converts_to::<Complex<u32>>(true));
+        assert!(!DataType::Int.converts_to::<Complex<i64>>(true));
+        assert!(!DataType::Int.converts_to::<Complex<u64>>(true));
+        assert!(DataType::Int.converts_to::<Complex<f32>>(true));
+        assert!(DataType::Int.converts_to::<Complex<f64>>(true));
+
+        assert!(!DataType::Int.reads_directly_to::<Complex<i8>>(false));
+        assert!(!DataType::Int.reads_directly_to::<Complex<u8>>(false));
+        assert!(!DataType::Int.reads_directly_to::<Complex<i16>>(false));
+        assert!(!DataType::Int.reads_directly_to::<Complex<u16>>(false));
+        assert!(!DataType::Int.reads_directly_to::<Complex<i32>>(false));
+        assert!(!DataType::Int.reads_directly_to::<Complex<u32>>(false));
+        assert!(!DataType::Int.reads_directly_to::<Complex<i64>>(false));
+        assert!(!DataType::Int.reads_directly_to::<Complex<u64>>(false));
+        assert!(!DataType::Int.reads_directly_to::<Complex<f32>>(false));
+        assert!(!DataType::Int.reads_directly_to::<Complex<f64>>(false));
+
+        assert!(!DataType::Int.reads_directly_to::<i8>(true));
+        assert!(!DataType::Int.reads_directly_to::<u8>(true));
+        assert!(!DataType::Int.reads_directly_to::<i16>(true));
+        assert!(!DataType::Int.reads_directly_to::<u16>(true));
+        assert!(!DataType::Int.reads_directly_to::<i32>(true));
+        assert!(!DataType::Int.reads_directly_to::<u32>(true));
+        assert!(!DataType::Int.reads_directly_to::<i64>(true));
+        assert!(!DataType::Int.reads_directly_to::<u64>(true));
+        assert!(!DataType::Int.reads_directly_to::<f32>(true));
+        assert!(!DataType::Int.reads_directly_to::<f64>(true));
+    }
+
+    #[test]
+    fn dtype_float() {
+        assert!(DataType::Float.is_floating());
+
+        assert!(!DataType::Float.reads_directly_to::<i8>(false));
+        assert!(!DataType::Float.reads_directly_to::<u8>(false));
+        assert!(!DataType::Float.reads_directly_to::<i16>(false));
+        assert!(!DataType::Float.reads_directly_to::<u16>(false));
+        assert!(!DataType::Float.reads_directly_to::<i32>(false));
+        assert!(!DataType::Float.reads_directly_to::<u32>(false));
+        assert!(!DataType::Float.reads_directly_to::<i64>(false));
+        assert!(!DataType::Float.reads_directly_to::<u64>(false));
+        assert!(DataType::Float.reads_directly_to::<f32>(false));
+        assert!(!DataType::Float.reads_directly_to::<f64>(false));
+
+        assert!(!DataType::Float.converts_to::<i8>(false));
+        assert!(!DataType::Float.converts_to::<u8>(false));
+        assert!(!DataType::Float.converts_to::<i16>(false));
+        assert!(!DataType::Float.converts_to::<u16>(false));
+        assert!(!DataType::Float.converts_to::<i32>(false));
+        assert!(!DataType::Float.converts_to::<u32>(false));
+        assert!(!DataType::Float.converts_to::<i64>(false));
+        assert!(!DataType::Float.converts_to::<u64>(false));
+        assert!(DataType::Float.converts_to::<f32>(false));
+        assert!(DataType::Float.converts_to::<f64>(false));
+
+        assert!(!DataType::Float.reads_directly_to::<Complex<i8>>(true));
+        assert!(!DataType::Float.reads_directly_to::<Complex<u8>>(true));
+        assert!(!DataType::Float.reads_directly_to::<Complex<i16>>(true));
+        assert!(!DataType::Float.reads_directly_to::<Complex<u16>>(true));
+        assert!(!DataType::Float.reads_directly_to::<Complex<i32>>(true));
+        assert!(!DataType::Float.reads_directly_to::<Complex<u32>>(true));
+        assert!(!DataType::Float.reads_directly_to::<Complex<i64>>(true));
+        assert!(!DataType::Float.reads_directly_to::<Complex<u64>>(true));
+        assert!(DataType::Float.reads_directly_to::<Complex<f32>>(true));
+        assert!(!DataType::Float.reads_directly_to::<Complex<f64>>(true));
+
+        assert!(!DataType::Float.converts_to::<Complex<i8>>(true));
+        assert!(!DataType::Float.converts_to::<Complex<u8>>(true));
+        assert!(!DataType::Float.converts_to::<Complex<i16>>(true));
+        assert!(!DataType::Float.converts_to::<Complex<u16>>(true));
+        assert!(!DataType::Float.converts_to::<Complex<i32>>(true));
+        assert!(!DataType::Float.converts_to::<Complex<u32>>(true));
+        assert!(!DataType::Float.converts_to::<Complex<i64>>(true));
+        assert!(!DataType::Float.converts_to::<Complex<u64>>(true));
+        assert!(DataType::Float.converts_to::<Complex<f32>>(true));
+        assert!(DataType::Float.converts_to::<Complex<f64>>(true));
+
+        assert!(!DataType::Float.reads_directly_to::<Complex<i8>>(false));
+        assert!(!DataType::Float.reads_directly_to::<Complex<u8>>(false));
+        assert!(!DataType::Float.reads_directly_to::<Complex<i16>>(false));
+        assert!(!DataType::Float.reads_directly_to::<Complex<u16>>(false));
+        assert!(!DataType::Float.reads_directly_to::<Complex<i32>>(false));
+        assert!(!DataType::Float.reads_directly_to::<Complex<u32>>(false));
+        assert!(!DataType::Float.reads_directly_to::<Complex<i64>>(false));
+        assert!(!DataType::Float.reads_directly_to::<Complex<u64>>(false));
+        assert!(!DataType::Float.reads_directly_to::<Complex<f32>>(false));
+        assert!(!DataType::Float.reads_directly_to::<Complex<f64>>(false));
+
+        assert!(!DataType::Float.reads_directly_to::<i8>(true));
+        assert!(!DataType::Float.reads_directly_to::<u8>(true));
+        assert!(!DataType::Float.reads_directly_to::<i16>(true));
+        assert!(!DataType::Float.reads_directly_to::<u16>(true));
+        assert!(!DataType::Float.reads_directly_to::<i32>(true));
+        assert!(!DataType::Float.reads_directly_to::<u32>(true));
+        assert!(!DataType::Float.reads_directly_to::<i64>(true));
+        assert!(!DataType::Float.reads_directly_to::<u64>(true));
+        assert!(!DataType::Float.reads_directly_to::<f32>(true));
+        assert!(!DataType::Float.reads_directly_to::<f64>(true));
+    }
+
+    #[test]
+    fn dtype_double() {
+        assert!(DataType::Double.is_floating());
+
+        assert!(!DataType::Double.reads_directly_to::<i8>(false));
+        assert!(!DataType::Double.reads_directly_to::<u8>(false));
+        assert!(!DataType::Double.reads_directly_to::<i16>(false));
+        assert!(!DataType::Double.reads_directly_to::<u16>(false));
+        assert!(!DataType::Double.reads_directly_to::<i32>(false));
+        assert!(!DataType::Double.reads_directly_to::<u32>(false));
+        assert!(!DataType::Double.reads_directly_to::<i64>(false));
+        assert!(!DataType::Double.reads_directly_to::<u64>(false));
+        assert!(!DataType::Double.reads_directly_to::<f32>(false));
+        assert!(DataType::Double.reads_directly_to::<f64>(false));
+
+        assert!(!DataType::Double.converts_to::<i8>(false));
+        assert!(!DataType::Double.converts_to::<u8>(false));
+        assert!(!DataType::Double.converts_to::<i16>(false));
+        assert!(!DataType::Double.converts_to::<u16>(false));
+        assert!(!DataType::Double.converts_to::<i32>(false));
+        assert!(!DataType::Double.converts_to::<u32>(false));
+        assert!(!DataType::Double.converts_to::<i64>(false));
+        assert!(!DataType::Double.converts_to::<u64>(false));
+        assert!(DataType::Double.converts_to::<f32>(false));
+        assert!(DataType::Double.converts_to::<f64>(false));
+
+        assert!(!DataType::Double.reads_directly_to::<Complex<i8>>(true));
+        assert!(!DataType::Double.reads_directly_to::<Complex<u8>>(true));
+        assert!(!DataType::Double.reads_directly_to::<Complex<i16>>(true));
+        assert!(!DataType::Double.reads_directly_to::<Complex<u16>>(true));
+        assert!(!DataType::Double.reads_directly_to::<Complex<i32>>(true));
+        assert!(!DataType::Double.reads_directly_to::<Complex<u32>>(true));
+        assert!(!DataType::Double.reads_directly_to::<Complex<i64>>(true));
+        assert!(!DataType::Double.reads_directly_to::<Complex<u64>>(true));
+        assert!(!DataType::Double.reads_directly_to::<Complex<f32>>(true));
+        assert!(DataType::Double.reads_directly_to::<Complex<f64>>(true));
+
+        assert!(!DataType::Double.converts_to::<Complex<i8>>(true));
+        assert!(!DataType::Double.converts_to::<Complex<u8>>(true));
+        assert!(!DataType::Double.converts_to::<Complex<i16>>(true));
+        assert!(!DataType::Double.converts_to::<Complex<u16>>(true));
+        assert!(!DataType::Double.converts_to::<Complex<i32>>(true));
+        assert!(!DataType::Double.converts_to::<Complex<u32>>(true));
+        assert!(!DataType::Double.converts_to::<Complex<i64>>(true));
+        assert!(!DataType::Double.converts_to::<Complex<u64>>(true));
+        assert!(DataType::Double.converts_to::<Complex<f32>>(true));
+        assert!(DataType::Double.converts_to::<Complex<f64>>(true));
+
+        assert!(!DataType::Double.reads_directly_to::<Complex<i8>>(false));
+        assert!(!DataType::Double.reads_directly_to::<Complex<u8>>(false));
+        assert!(!DataType::Double.reads_directly_to::<Complex<i16>>(false));
+        assert!(!DataType::Double.reads_directly_to::<Complex<u16>>(false));
+        assert!(!DataType::Double.reads_directly_to::<Complex<i32>>(false));
+        assert!(!DataType::Double.reads_directly_to::<Complex<u32>>(false));
+        assert!(!DataType::Double.reads_directly_to::<Complex<i64>>(false));
+        assert!(!DataType::Double.reads_directly_to::<Complex<u64>>(false));
+        assert!(!DataType::Double.reads_directly_to::<Complex<f32>>(false));
+        assert!(!DataType::Double.reads_directly_to::<Complex<f64>>(false));
+
+        assert!(!DataType::Double.reads_directly_to::<i8>(true));
+        assert!(!DataType::Double.reads_directly_to::<u8>(true));
+        assert!(!DataType::Double.reads_directly_to::<i16>(true));
+        assert!(!DataType::Double.reads_directly_to::<u16>(true));
+        assert!(!DataType::Double.reads_directly_to::<i32>(true));
+        assert!(!DataType::Double.reads_directly_to::<u32>(true));
+        assert!(!DataType::Double.reads_directly_to::<i64>(true));
+        assert!(!DataType::Double.reads_directly_to::<u64>(true));
+        assert!(!DataType::Double.reads_directly_to::<f32>(true));
+        assert!(!DataType::Double.reads_directly_to::<f64>(true));
     }
 }
